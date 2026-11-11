@@ -14,6 +14,6 @@ fi
 if command -v uv >/dev/null 2>&1; then
     uv pip sync --python "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/requirements.txt"
 else
-    "$PROJECT_DIR/.venv/bin/python" -m pip install -r "$PROJECT_DIR/requirements.txt"
+    "$PROJECT_DIR/.venv/bin/python" -m pip --isolated install --use-deprecated=legacy-certs -r "$PROJECT_DIR/requirements.txt"
 fi
 exec "$PROJECT_DIR/.venv/bin/python" -I "$PROJECT_DIR/scripts/native_host/install_host.py" "$@"
