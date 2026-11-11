@@ -38,7 +38,7 @@ Run the packaging script to generate the store-ready ZIP:
   > Used with `activeTab` (or user-granted optional host permissions) to run `content_script.js` on demand when the user opens the Side Panel or clicks "Refresh" / "Ingest" to parse scholarly metadata, headings, figures, and tables from the current page.
 
 - **`optional_host_permissions` (`https://*/*`, `http://*/*`)**:
-  > Academic journals are hosted across thousands of university, society, and publisher domains. Optional host permissions are requested only on user gesture if the user switches tabs while the Side Panel is already open and clicks "Refresh" (`🔄 重新整理`).
+  > Academic journals are hosted across thousands of university, society, and publisher domains. These hosts are not granted at install, and the extension does not request the `"tabs"` permission. They are requested only when the user clicks "Refresh" (`🔄 重新整理`): the current site alone when its URL is already visible, or these optional http(s) patterns when Chrome has omitted the tab URL because `activeTab` was not granted.
 
 - **`clipboardRead`**:
   > Used exclusively when the user clicks the "📋 讀取剪貼簿內容" (Read Clipboard) button in the Side Panel to import reading notes or translations into their note editor.

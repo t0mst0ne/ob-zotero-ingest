@@ -290,10 +290,18 @@ function connectToNativeHost() {
 
     nativePort.onDisconnect.addListener(() => {
       const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : "Disconnected";
-      console.warn("Native host disconnected:", err);
+      const wasOnline = isNativeHostOnline;
       isNativeHostOnline = false;
       nativePort = null;
       updateBrowserVaultBadge();
+      // Browser-only File System Access mode is expected to run with no host
+      // installed. connectNative then disconnects immediately ("Specified native
+      // messaging host not found."). That is not a session failure — stay quiet
+      // and let the panel fall back to the vault-folder badge. Warn only if a
+      // host that had already answered ping drops mid-session.
+      if (wasOnline) {
+        console.warn("Native host disconnected:", err);
+      }
       if (isIngesting && !vaultDirHandle) {
         showError("本地入庫進程通訊已結束。");
       }
@@ -392,6 +400,66 @@ async function requestTabOriginPermission(url) {
   }
 }
 
+// Chrome omits tab.url / tab.title / tab.pendingUrl unless this extension has
+// activeTab for that tab, a host permission for the origin, or the "tabs"
+// permission. "tabs" is intentionally not requested: it would expose every
+// tab URL ("Read your browsing history") at install time. The toolbar click
+// grants activeTab; the「重新整理」button can ask for the optional host
+// permissions already declared in the manifest.
+const TAB_URL_UNAVAILABLE_HINT =
+  "無法讀取此分頁的網址，因此無法檢測文獻。請點「🔄 重新整理」並允許存取此網站；若這是瀏覽器內部頁面，請改開一般網頁。";
+
+function readTabUrl(tab) {
+  if (!tab) return "";
+  if (typeof tab.url === "string" && tab.url) return tab.url;
+  if (typeof tab.pendingUrl === "string" && tab.pendingUrl) return tab.pendingUrl;
+  return "";
+}
+
+function isInternalBrowserUrl(url) {
+  return url.startsWith("chrome://") ||
+    url.startsWith("chrome-extension://") ||
+    url.startsWith("chrome-untrusted://") ||
+    url.startsWith("edge://") ||
+    url.startsWith("about:") ||
+    url.startsWith("devtools://");
+}
+
+async function requestOptionalWebAccess() {
+  if (!chrome.permissions || typeof chrome.permissions.request !== "function") return false;
+  try {
+    return Boolean(await chrome.permissions.request({
+      origins: ["https://*/*", "http://*/*"],
+    }));
+  } catch (e) {
+    return false;
+  }
+}
+
+async function resolveActiveTab(fromUserGesture) {
+  const queried = await chrome.tabs.query({ active: true, currentWindow: true });
+  let tab = queried && queried[0];
+  if (!tab || !tab.id) return { tab: null, url: "" };
+
+  let url = readTabUrl(tab);
+  // A side-panel button click is a user gesture for permissions.request, but
+  // it does not grant activeTab. Without a URL we cannot name this origin, so
+  // ask for the optional http(s) host permissions; after they are granted,
+  // tabs.query includes url for ordinary web pages.
+  if (!url && fromUserGesture) {
+    const granted = await requestOptionalWebAccess();
+    if (granted) {
+      const retried = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (retried && retried[0] && retried[0].id) tab = retried[0];
+      url = readTabUrl(tab);
+    }
+  }
+  if (url && tab.url !== url) {
+    tab = Object.assign({}, tab, { url: url });
+  }
+  return { tab: tab, url: url };
+}
+
 async function detectActiveTab(fromUserGesture = false) {
   if (!nativePort) {
     connectToNativeHost();
@@ -400,19 +468,26 @@ async function detectActiveTab(fromUserGesture = false) {
   btnDetect.disabled = true;
 
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const resolved = await resolveActiveTab(fromUserGesture);
+    const tab = resolved.tab;
+    const url = resolved.url;
     if (!tab || !tab.id) {
       showEmpty("找不到目前啟用的瀏覽器分頁。");
       return;
     }
 
-    if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) {
+    if (!url) {
+      showEmpty(TAB_URL_UNAVAILABLE_HINT);
+      return;
+    }
+
+    if (isInternalBrowserUrl(url)) {
       showEmpty("無法在瀏覽器系統頁面上擷取文獻。");
       return;
     }
 
     // Chrome's built-in PDF viewer does not expose publisher citation meta tags.
-    if (isPdfTabUrl(tab.url)) {
+    if (isPdfTabUrl(url)) {
       await inspectPdfTab(tab);
       return;
     }
@@ -425,13 +500,14 @@ async function detectActiveTab(fromUserGesture = false) {
         files: ["content_script.js"],
       });
     } catch (scriptErr) {
-      if (fromUserGesture && await requestTabOriginPermission(tab.url)) {
+      if (fromUserGesture && await requestTabOriginPermission(url)) {
         results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           files: ["content_script.js"],
         });
       } else {
-        throw scriptErr;
+        showEmpty(TAB_URL_UNAVAILABLE_HINT);
+        return;
       }
     }
 

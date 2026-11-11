@@ -22,7 +22,7 @@ When the optional local Native Host is installed and triggered by the user:
 ### 4. Permissions Justification
 - **`sidePanel`**: Displays the article extraction, vault alignment status, and Markdown import interface in Chrome's Side Panel.
 - **`activeTab` & `scripting`**: Executes `content_script.js` in the currently active tab when the user opens the Side Panel or clicks "重新整理" / "一鍵入庫" to extract academic metadata, text sections, figures, and tables.
-- **`optional_host_permissions` (`https://*/*`, `http://*/*`)**: Requested on-demand only when the user explicitly clicks "重新整理" from an already-open Side Panel after switching to a tab where `activeTab` was not yet triggered.
+- **`optional_host_permissions` (`https://*/*`, `http://*/*`)**: Not granted at install, and the `"tabs"` permission is not requested. These hosts are requested only when the user clicks「重新整理」. If the current tab URL is already known, only that site's origin is requested. If Chrome omitted the URL (no `activeTab` grant and no host permission yet), the same click asks for these optional http(s) patterns so detection can continue.
 - **`clipboardRead`**: Used only when the user explicitly clicks the "📋 讀取剪貼簿內容" button to paste reading notes into the Side Panel.
 - **`downloads`**: Used only when the user initiates PDF ingestion or inspection on a PDF tab and in-page `fetch` is unavailable.
 - **`nativeMessaging`**: Connects to the optional local host (`com.ob.zotero.ingest`) installed by the user to write files into their local Obsidian Vault and check local Zotero status.
