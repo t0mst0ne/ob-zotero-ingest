@@ -8,12 +8,15 @@ const NATIVE_HOST_NAME = "com.ob.zotero.ingest";
 
 // State
 let nativePort = null;
+let isNativeHostOnline = false;
+let vaultDirHandle = null;
 let currentArticleData = null;
 let isIngesting = false;
 let currentVaultName = "OB";
 
 // DOM Elements
 const hostBadge = document.getElementById("host-badge");
+const btnPickVault = document.getElementById("btn-pick-vault");
 const btnDetect = document.getElementById("btn-detect");
 const btnIngest = document.getElementById("btn-ingest");
 const btnCopyMd = document.getElementById("btn-copy-md");
@@ -58,6 +61,219 @@ const pasteResultMsg = document.getElementById("paste-result-msg");
 const linkPasteOb = document.getElementById("link-paste-ob");
 
 
+// ── Browser File System Access API (Zero-Python Local Vault Mode) ───────────
+
+const VAULT_IDB_NAME = "ob_zotero_vault_db";
+const VAULT_IDB_STORE = "handles";
+const VAULT_IDB_KEY = "vault_dir";
+
+function openVaultIdb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      resolve(null);
+      return;
+    }
+    const req = indexedDB.open(VAULT_IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(VAULT_IDB_STORE)) {
+        db.createObjectStore(VAULT_IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveVaultHandleToIdb(handle) {
+  try {
+    const db = await openVaultIdb();
+    if (!db) return;
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(VAULT_IDB_STORE, "readwrite");
+      tx.objectStore(VAULT_IDB_STORE).put(handle, VAULT_IDB_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn("Could not persist vault handle to IndexedDB:", e);
+  }
+}
+
+async function loadVaultHandleFromIdb() {
+  try {
+    const db = await openVaultIdb();
+    if (!db) return null;
+    return await new Promise((resolve) => {
+      const tx = db.transaction(VAULT_IDB_STORE, "readonly");
+      const req = tx.objectStore(VAULT_IDB_STORE).get(VAULT_IDB_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function ensureVaultPermission(handle, mode = "readwrite", promptUser = true) {
+  if (!handle) return false;
+  try {
+    if (typeof handle.queryPermission === "function") {
+      const state = await handle.queryPermission({ mode });
+      if (state === "granted") return true;
+    }
+    if (promptUser && typeof handle.requestPermission === "function") {
+      const state = await handle.requestPermission({ mode });
+      return state === "granted";
+    }
+    return typeof handle.queryPermission !== "function";
+  } catch (e) {
+    return false;
+  }
+}
+
+function updateBrowserVaultBadge() {
+  if (isNativeHostOnline) return;
+  if (vaultDirHandle) {
+    currentVaultName = vaultDirHandle.name || currentVaultName;
+    hostBadge.textContent = `● 瀏覽器直連 (${currentVaultName})`;
+    hostBadge.className = "badge badge-connected cursor-pointer";
+    if (btnPickVault) btnPickVault.textContent = `📂 ${currentVaultName} (更換)`;
+  } else {
+    hostBadge.textContent = "○ 點此選擇 Vault 或連線";
+    hostBadge.className = "badge badge-disconnected cursor-pointer";
+    if (btnPickVault) btnPickVault.textContent = "📂 選擇 Vault 資料夾";
+  }
+}
+
+async function pickVaultDirectory() {
+  if (typeof window === "undefined" || typeof window.showDirectoryPicker !== "function") {
+    showError("目前瀏覽器環境不支援 File System Access API (showDirectoryPicker)。");
+    return null;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+    if (handle) {
+      vaultDirHandle = handle;
+      currentVaultName = handle.name || "OB";
+      await saveVaultHandleToIdb(handle);
+      updateBrowserVaultBadge();
+      if (currentArticleData && currentArticleData.metadata && !isNativeHostOnline) {
+        await checkBrowserVaultStatus(currentArticleData.metadata, topicSelect ? topicSelect.value : "Neurology");
+      }
+    }
+    return handle;
+  } catch (e) {
+    if (e && e.name !== "AbortError") {
+      console.warn("Directory picker error:", e);
+    }
+    return null;
+  }
+}
+
+async function getSubDirHandle(rootHandle, pathParts, create = false) {
+  let curr = rootHandle;
+  for (const part of pathParts) {
+    if (!part) continue;
+    try {
+      curr = await curr.getDirectoryHandle(part, { create });
+    } catch (e) {
+      return null;
+    }
+  }
+  return curr;
+}
+
+async function readFileTextFromDir(dirHandle, filename) {
+  if (!dirHandle || !filename) return null;
+  try {
+    const fh = await dirHandle.getFileHandle(filename, { create: false });
+    const file = await fh.getFile();
+    return await file.text();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function writeFileToDir(dirHandle, filename, content) {
+  const fh = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fh.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+async function listDirNames(dirHandle) {
+  if (!dirHandle || typeof dirHandle.entries !== "function") return [];
+  const names = [];
+  try {
+    for await (const [name] of dirHandle.entries()) {
+      names.push(name);
+    }
+  } catch (e) {}
+  return names;
+}
+
+async function checkBrowserVaultStatus(meta, topic) {
+  if (!vaultDirHandle || !meta) return;
+  const granted = await ensureVaultPermission(vaultDirHandle, "read", false);
+  if (!granted) return;
+
+  const targetTopic = topic || "Neurology";
+  const stem = computeStem(meta);
+  const pmid = meta.pmid ? String(meta.pmid).trim() : null;
+  const safeDoi = meta.doi ? String(meta.doi).trim().toLowerCase().replace(/[^\w.\-]+/g, "_") : null;
+
+  const notesDir = await getSubDirHandle(vaultDirHandle, ["Research", targetTopic, "notes"], false);
+  const sourcesDir = await getSubDirHandle(vaultDirHandle, ["Research", targetTopic, "sources"], false);
+  const pdfsDir = await getSubDirHandle(vaultDirHandle, ["Research", targetTopic, "sources", "etc"], false);
+
+  let notePath = null;
+  let sourcePath = null;
+  let pdfPath = null;
+
+  const matchesPaper = (name, ext) => {
+    if (!name.endsWith(ext)) return false;
+    if (name === `${stem}${ext}` || name === `${stem}-notes${ext}`) return true;
+    if (pmid && name.includes(pmid)) return true;
+    if (safeDoi && name.toLowerCase().includes(safeDoi)) return true;
+    return false;
+  };
+
+  if (notesDir) {
+    const names = await listDirNames(notesDir);
+    const found = names.find((n) => !n.endsWith("-中文翻譯.md") && matchesPaper(n, ".md"));
+    if (found) notePath = `Research/${targetTopic}/notes/${found}`;
+  }
+  if (sourcesDir) {
+    const names = await listDirNames(sourcesDir);
+    const found = names.find((n) => matchesPaper(n, ".md"));
+    if (found) sourcePath = `Research/${targetTopic}/sources/${found}`;
+  }
+  if (pdfsDir) {
+    const names = await listDirNames(pdfsDir);
+    const found = names.find((n) => matchesPaper(n, ".pdf"));
+    if (found) pdfPath = `Research/${targetTopic}/sources/etc/${found}`;
+  }
+
+  updateStatusMatrix({
+    obsidian: {
+      has_note: Boolean(notePath),
+      note_path: notePath,
+      has_source: Boolean(sourcePath),
+      source_path: sourcePath,
+    },
+    pdf: {
+      has_pdf: Boolean(pdfPath),
+      pdf_path: pdfPath,
+    },
+    zotero: {
+      has_item: false,
+      key: null,
+    },
+  });
+}
+
+
 // ── Native Messaging Communication ──────────────────────────────────────────
 
 function connectToNativeHost() {
@@ -75,10 +291,10 @@ function connectToNativeHost() {
     nativePort.onDisconnect.addListener(() => {
       const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : "Disconnected";
       console.warn("Native host disconnected:", err);
-      hostBadge.textContent = "○ 點此重新連線";
-      hostBadge.className = "badge badge-disconnected cursor-pointer";
+      isNativeHostOnline = false;
       nativePort = null;
-      if (isIngesting) {
+      updateBrowserVaultBadge();
+      if (isIngesting && !vaultDirHandle) {
         showError("本地入庫進程通訊已結束。");
       }
     });
@@ -87,13 +303,13 @@ function connectToNativeHost() {
     nativePort.postMessage({ action: "ping", payload: {} });
   } catch (err) {
     console.error("Failed to connect to native host:", err);
-    hostBadge.textContent = "○ 點此重新連線";
-    hostBadge.className = "badge badge-disconnected cursor-pointer";
+    isNativeHostOnline = false;
+    updateBrowserVaultBadge();
   }
 }
 
 function sendNativeMessage(action, payload) {
-  if (!nativePort) {
+  if (!nativePort && !(action === "check_status" && !isNativeHostOnline && vaultDirHandle)) {
     connectToNativeHost();
   }
   if (nativePort) {
@@ -105,8 +321,10 @@ function sendNativeMessage(action, payload) {
         if (nativePort) nativePort.postMessage({ action, payload });
       }, 150);
     }
+  } else if (action === "check_status" && vaultDirHandle && currentArticleData) {
+    checkBrowserVaultStatus(currentArticleData.metadata, payload.topic);
   } else if (action !== "check_status" && action !== "ping") {
-    showError("無法連線至本地 Native Messaging Host，請先依 README 執行 ./install.sh 並設定 Vault（或使用上方「複製結構化全文 Markdown」）。");
+    showError("無法連線至本地 Native Messaging Host，請點選「📂 選擇 Vault 資料夾」直接寫入，或依 README 執行 ./install.sh。");
   }
 }
 
@@ -135,6 +353,7 @@ function handleNativeResponse(msg) {
   }
   if (msg.status === "ok" && msg.version) {
     // Ping response
+    isNativeHostOnline = true;
     if (msg.vault_name) currentVaultName = msg.vault_name;
     hostBadge.textContent = `● 本地庫已連線 (Zotero: ${msg.zotero_indexed_dois} 篇)`;
     hostBadge.className = "badge badge-connected";
@@ -688,6 +907,240 @@ async function downloadAndUploadPdf(pdfUrl, metadata, topic) {
   }
 }
 
+function generateCitekeyInBrowser(meta) {
+  let firstAuthor = "unknown";
+  if (meta && meta.authors) {
+    firstAuthor = extractLeadAuthor(meta.authors).toLowerCase().replace(/[^\w]/g, "") || "unknown";
+  }
+  const yearStr = meta && meta.year ? String(meta.year) : "";
+  const stopWords = new Set(["a", "an", "the", "of", "in", "on", "for", "and", "to", "with", "is", "at", "by"]);
+  const words = String((meta && meta.title) || "")
+    .split(/\W+/)
+    .map((w) => w.toLowerCase())
+    .filter((w) => w && !stopWords.has(w));
+  const keyword = words.length > 0 ? words[0].replace(/[^\w]/g, "") : "";
+  return `${firstAuthor}${yearStr}${keyword}`;
+}
+
+function detectImageExtension(bytes) {
+  if (!bytes || bytes.length < 12) return null;
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return ".png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return ".jpg";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return ".gif";
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) {
+    return ".webp";
+  }
+  return null;
+}
+
+function isValidPdfBytes(bytes) {
+  if (!bytes || bytes.length <= 1024) return false;
+  const head = bytes.subarray ? bytes.subarray(0, 1024) : new Uint8Array(bytes.slice(0, 1024));
+  let str = "";
+  for (let i = 0; i < head.length; i++) str += String.fromCharCode(head[i]);
+  return str.includes("%PDF");
+}
+
+async function fetchPdfBytesForBrowserVault(pdfUrl, doi) {
+  const tryFetchUrl = async (url) => {
+    if (!url || typeof fetch !== "function") return null;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const ab = await r.arrayBuffer();
+      const bytes = new Uint8Array(ab);
+      return isValidPdfBytes(bytes) ? bytes : null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // 1. Active tab session fetch
+  if (pdfUrl && chrome.tabs && chrome.scripting) {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab && tab.id) {
+        const [res] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: async (url) => {
+            try {
+              const r = await fetch(url, { credentials: "include" });
+              if (!r.ok) return null;
+              const b = await r.blob();
+              if (b.size <= 1024) return null;
+              return await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  const s = String(reader.result || "");
+                  resolve(s.includes(",") ? s.split(",")[1] : s);
+                };
+                reader.onerror = () => resolve(null);
+                reader.readAsDataURL(b);
+              });
+            } catch (e) {
+              return null;
+            }
+          },
+          args: [pdfUrl],
+        });
+        if (res && res.result) {
+          const binStr = atob(res.result);
+          const bytes = new Uint8Array(binStr.length);
+          for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+          if (isValidPdfBytes(bytes)) return { bytes, source: "browser_capture" };
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 2. Direct fetch in sidepanel context
+  if (pdfUrl) {
+    const direct = await tryFetchUrl(pdfUrl);
+    if (direct) return { bytes: direct, source: "webpage_link" };
+  }
+
+  // 3. Unpaywall Open Access
+  if (doi && typeof fetch === "function") {
+    try {
+      const cleanDoi = String(doi).trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+      const r = await fetch(`https://api.unpaywall.org/v2/${encodeURIComponent(cleanDoi)}?email=academic-ingest@ob-vault.local`);
+      if (r.ok) {
+        const data = await r.json();
+        const bestUrl = data && data.best_oa_location && data.best_oa_location.url_for_pdf;
+        if (bestUrl) {
+          const oaBytes = await tryFetchUrl(bestUrl);
+          if (oaBytes) return { bytes: oaBytes, source: "unpaywall_oa" };
+        }
+      }
+    } catch (e) {}
+  }
+
+  return null;
+}
+
+async function ingestViaBrowserFileSystem() {
+  if (!vaultDirHandle) {
+    const picked = await pickVaultDirectory();
+    if (!picked) {
+      showError("請先選擇本地 Obsidian Vault 資料夾以寫入檔案。");
+      return;
+    }
+  }
+  const granted = await ensureVaultPermission(vaultDirHandle, "readwrite", true);
+  if (!granted) {
+    showError("未取得本地 Vault 資料夾的讀寫授權。");
+    return;
+  }
+
+  try {
+    const topic = topicSelect ? topicSelect.value : "Neurology";
+    const saveSource = optSource ? optSource.checked : false;
+    const shouldDownloadPdf = optPdf ? optPdf.checked : true;
+    const shouldDownloadFigures = optFigures ? optFigures.checked : true;
+
+    const meta = Object.assign({}, currentArticleData.metadata || {});
+    if (!meta.citekey) meta.citekey = generateCitekeyInBrowser(meta);
+    const stem = computeStem(meta);
+
+    const sourcesDir = await getSubDirHandle(vaultDirHandle, ["Research", topic, "sources"], true);
+    const pdfsDir = await getSubDirHandle(vaultDirHandle, ["Research", topic, "sources", "etc"], true);
+    const figures = currentArticleData.figures || [];
+    const downloadedFigs = [];
+
+    // 1. Download Figures
+    if (shouldDownloadFigures && figures.length > 0 && typeof fetch === "function") {
+      progressText.textContent = `正在下載 ${figures.length} 張高解析度圖表至本地 Vault...`;
+      const assetsDir = await getSubDirHandle(vaultDirHandle, ["Research", topic, "sources", "_assets", stem], true);
+      for (let i = 0; i < figures.length; i++) {
+        const fig = figures[i];
+        if (!fig || !fig.src) continue;
+        const label = fig.label || `Fig_${i + 1}`;
+        const cleanLabel = String(label).replace(/[\\/*?:"<>|]/g, "").replace(/[\s_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || `Fig_${i + 1}`;
+        try {
+          const r = await fetch(fig.src);
+          if (!r.ok) continue;
+          const bytes = new Uint8Array(await r.arrayBuffer());
+          const ext = detectImageExtension(bytes);
+          if (!ext) continue;
+          const imgFilename = `${cleanLabel}_${i + 1}${ext}`;
+          await writeFileToDir(assetsDir, imgFilename, bytes);
+          downloadedFigs.push({
+            original_src: fig.src,
+            local_rel_path: `_assets/${stem}/${imgFilename}`,
+            label: label,
+            caption: fig.caption || "",
+          });
+        } catch (e) {
+          console.warn("Figure download failed in browser mode:", e);
+        }
+      }
+    }
+
+    // 2. Download / Save PDF
+    let savedPdf = false;
+    let pdfSource = null;
+    if (shouldDownloadPdf && pdfsDir) {
+      progressText.textContent = "正在下載並驗證論文原始 PDF...";
+      const pdfRes = await fetchPdfBytesForBrowserVault(meta.pdf_url, meta.doi);
+      if (pdfRes && pdfRes.bytes) {
+        await writeFileToDir(pdfsDir, `${stem}.pdf`, pdfRes.bytes);
+        savedPdf = true;
+        pdfSource = pdfRes.source;
+      } else {
+        pdfSource = "未能自動下載（請確認期刊權限或開放取用狀態）";
+      }
+    }
+
+    // 3. Write Source Markdown
+    const sourceRelPath = `Research/${topic}/sources/${stem}.md`;
+    if (saveSource && sourcesDir) {
+      const articleForMd = {
+        metadata: meta,
+        sections: currentArticleData.sections || [],
+        figures: downloadedFigs.length > 0
+          ? downloadedFigs.map((f) => ({ src: f.local_rel_path, label: f.label, caption: f.caption }))
+          : figures,
+        tables: currentArticleData.tables || [],
+      };
+      const mdText = buildStructuredMarkdown(articleForMd, topic, {
+        citekey: meta.citekey,
+        pdfRelPath: savedPdf ? `Research/${topic}/sources/etc/${stem}.pdf` : null,
+      });
+      await writeFileToDir(sourcesDir, `${stem}.md`, mdText);
+    }
+
+    const pdfRelPath = `Research/${topic}/sources/etc/${stem}.pdf`;
+    handleIngestionSuccess({
+      status: "success",
+      stem: stem,
+      metadata: meta,
+      source: {
+        created: saveSource,
+        path: saveSource ? sourceRelPath : null,
+        figures_found: figures.length,
+        figures_requested: shouldDownloadFigures,
+        figures_downloaded: downloadedFigs.length,
+      },
+      pdf: {
+        saved: savedPdf,
+        source: pdfSource,
+        path: savedPdf ? pdfRelPath : null,
+        obsidian_uri: savedPdf
+          ? `obsidian://open?vault=${encodeURIComponent(currentVaultName)}&file=${encodeURIComponent(pdfRelPath)}`
+          : null,
+      },
+      note: { created: false, updated: false },
+      zotero: { key: null, url: null },
+    });
+  } catch (err) {
+    console.error("Browser File System ingestion error:", err);
+    showError(`瀏覽器直連寫入失敗: ${err.message || err}`);
+  }
+}
+
 async function startIngestion() {
   if (!currentArticleData || isIngesting) return;
 
@@ -697,6 +1150,12 @@ async function startIngestion() {
   progressSpinner.classList.remove("hidden");
   resultSuccess.classList.add("hidden");
   resultError.classList.add("hidden");
+
+  // Use zero-Python Browser File System Access API mode when Native Host is not connected
+  if (!nativePort && !isNativeHostOnline && (vaultDirHandle || (typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"))) {
+    await ingestViaBrowserFileSystem();
+    return;
+  }
 
   const figCount = currentArticleData.figures ? currentArticleData.figures.length : 0;
   const topic = topicSelect.value;
@@ -883,7 +1342,7 @@ async function pasteFromClipboard() {
   }
 }
 
-function buildStructuredMarkdown(articleData, topic) {
+function buildStructuredMarkdown(articleData, topic, extraFrontmatter = {}) {
   const meta = (articleData && articleData.metadata) || {};
   const sections = (articleData && articleData.sections) || [];
   const figures = (articleData && articleData.figures) || [];
@@ -897,7 +1356,9 @@ function buildStructuredMarkdown(articleData, topic) {
   if (meta.year) lines.push(`year: ${meta.year}`);
   if (meta.doi) lines.push(`doi: ${meta.doi}`);
   if (meta.pmid) lines.push(`pmid: ${meta.pmid}`);
+  if (extraFrontmatter.citekey || meta.citekey) lines.push(`citekey: ${extraFrontmatter.citekey || meta.citekey}`);
   if (meta.url) lines.push(`url: ${meta.url}`);
+  if (extraFrontmatter.pdfRelPath) lines.push(`pdf: ${extraFrontmatter.pdfRelPath}`);
   lines.push(`captured_date: ${new Date().toISOString().slice(0, 10)}`);
   lines.push("type: source-snapshot");
   lines.push(`tags: [source, ${(topic || "neurology").toLowerCase()}, full-text]`);
@@ -958,7 +1419,135 @@ async function copyStructuredMarkdown() {
   }
 }
 
-function saveReadingNote() {
+function cleanPdfTextInBrowser(text) {
+  let cleaned = String(text || "").replace(/(\b\w+)-\s*\n\s*(\w+\b)/g, "$1$2");
+  const lines = cleaned.split(/\r?\n/);
+  const joined = [];
+  const mdBlockRe = /^(?:#{1,6}\s|\||>|[-*+]\s|\d+\.\s|---+$|```)/;
+  for (const line of lines) {
+    const stripped = line.trim();
+    if (!stripped) {
+      joined.push("");
+      continue;
+    }
+    const prev = joined.length > 0 ? joined[joined.length - 1] : "";
+    if (
+      prev &&
+      !mdBlockRe.test(prev) &&
+      !mdBlockRe.test(stripped) &&
+      !/([.。?!:：]|\b\d+\.|\b[-*#])\s*$/.test(prev) &&
+      /^[a-zA-Z0-9\u4e00-\u9fa5]/.test(stripped)
+    ) {
+      joined[joined.length - 1] = `${prev} ${stripped}`;
+      continue;
+    }
+    joined.push(stripped);
+  }
+  return joined.join("\n");
+}
+
+function cleanHtmlToMdInBrowser(htmlStr) {
+  let s = String(htmlStr || "");
+  s = s.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_, inner) => `\n\`\`\`\n${inner.replace(/<[^>]+>/g, "").trim()}\n\`\`\`\n`);
+  s = s.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_, inner) => `\`${inner.replace(/<[^>]+>/g, "").trim()}\``);
+  s = s.replace(/<(?:strong|b)\b[^>]*>([\s\S]*?)<\/(?:strong|b)>/gi, (_, inner) => `**${inner.replace(/<[^>]+>/g, "").trim()}**`);
+  s = s.replace(/<(?:em|i)\b[^>]*>([\s\S]*?)<\/(?:em|i)>/gi, (_, inner) => `*${inner.replace(/<[^>]+>/g, "").trim()}*`);
+  s = s.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, lvl, inner) => `\n\n${"#".repeat(Number(lvl))} ${inner.replace(/<[^>]+>/g, "").trim()}\n\n`);
+  s = s.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_, inner) => `\n- ${inner.replace(/<[^>]+>/g, "").trim()}`);
+  s = s.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_, inner) => `\n\n${inner.replace(/<[^>]+>/g, "").trim()}\n\n`);
+  s = s.replace(/<br\s*\/?>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, "");
+  return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function splitNoteFrontmatter(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  if (lines.length > 0 && lines[0].trim() === "---") {
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === "---") {
+        return {
+          hasFrontmatter: true,
+          frontmatterBlock: lines.slice(0, i + 1).join("\n"),
+          body: lines.slice(i + 1).join("\n").trim(),
+        };
+      }
+    }
+  }
+  return { hasFrontmatter: false, frontmatterBlock: "", body: String(text || "").trim() };
+}
+
+async function saveReadingNoteViaBrowserFileSystem(payload) {
+  if (!vaultDirHandle) {
+    const picked = await pickVaultDirectory();
+    if (!picked) {
+      btnSaveNote.disabled = false;
+      btnSaveNote.textContent = "💾 寫入 Obsidian 筆記";
+      return;
+    }
+  }
+  const granted = await ensureVaultPermission(vaultDirHandle, "readwrite", true);
+  if (!granted) {
+    btnSaveNote.disabled = false;
+    btnSaveNote.textContent = "💾 寫入 Obsidian 筆記";
+    showError("未取得本地 Vault 資料夾的讀寫授權。");
+    return;
+  }
+
+  try {
+    const topic = payload.topic || "Neurology";
+    const targetType = payload.target_type || "note";
+    const rawContent = String(payload.content || "").trim();
+    const looksLikeHtml = /<\s*(?:p|div|h[1-6]|table|tr|td|th|ul|ol|li|strong|b|em|i|blockquote|pre|code|br|article|section|span)\b[^>]*>/i.test(rawContent);
+
+    let processed = rawContent;
+    if (looksLikeHtml && payload.is_html) {
+      processed = cleanHtmlToMdInBrowser(rawContent);
+    } else if (payload.is_pdf && !looksLikeHtml) {
+      processed = cleanPdfTextInBrowser(rawContent);
+    }
+
+    const incoming = splitNoteFrontmatter(processed);
+    const bodyToWrite = incoming.body;
+
+    const notesDir = await getSubDirHandle(vaultDirHandle, ["Research", topic, "notes"], true);
+    const baseName = payload.stem || payload.citekey || (payload.pmid ? `pmid_${payload.pmid}` : "unknown");
+    const filename = targetType === "note" ? `${baseName}.md` : `${baseName}-中文翻譯.md`;
+
+    const existingText = await readFileTextFromDir(notesDir, filename);
+    let finalContent = "";
+    if (existingText !== null) {
+      const existingParsed = splitNoteFrontmatter(existingText);
+      if (existingParsed.hasFrontmatter) {
+        finalContent = `${existingParsed.frontmatterBlock}\n\n${bodyToWrite}\n`;
+      } else {
+        finalContent = `${bodyToWrite}\n`;
+      }
+    } else {
+      const citekey = payload.citekey || (currentArticleData && currentArticleData.metadata ? generateCitekeyInBrowser(currentArticleData.metadata) : "");
+      if (targetType === "note") {
+        finalContent = `---\ncitekey: ${citekey}\ndoi: ${payload.doi || ""}\npmid: ${payload.pmid || ""}\ntopic: ${topic.toLowerCase()}\ntype: reading-note\n---\n\n${bodyToWrite}\n`;
+      } else {
+        finalContent = `---\ntype: paper-translation\ncitekey: ${citekey}\ndoi: ${payload.doi || ""}\npmid: ${payload.pmid || ""}\ntopic: ${topic.toLowerCase()}\n---\n\n${bodyToWrite}\n`;
+      }
+    }
+
+    await writeFileToDir(notesDir, filename, finalContent);
+    const relPath = `Research/${topic}/notes/${filename}`;
+    handleSaveNoteResponse({
+      status: "success",
+      message: `筆記內容已直接寫入 ${filename}！`,
+      note_path: relPath,
+      obsidian_uri: `obsidian://open?vault=${encodeURIComponent(currentVaultName)}&file=${encodeURIComponent(relPath)}`,
+      target_type: targetType,
+    });
+  } catch (err) {
+    btnSaveNote.disabled = false;
+    btnSaveNote.textContent = "💾 寫入 Obsidian 筆記";
+    showError(`寫入筆記失敗: ${err.message || err}`);
+  }
+}
+
+async function saveReadingNote() {
   const content = pasteContent.value.trim();
   if (!content) {
     alert("請先貼上或輸入筆記內容！");
@@ -985,6 +1574,11 @@ function saveReadingNote() {
     is_html: optAutoHtml.checked,
     is_pdf: optAutoPdf.checked,
   };
+
+  if (!nativePort && !isNativeHostOnline && (vaultDirHandle || (typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"))) {
+    await saveReadingNoteViaBrowserFileSystem(payload);
+    return;
+  }
 
   sendNativeMessage("save_reading_note", payload);
 }
@@ -1014,11 +1608,27 @@ function handleSaveNoteResponse(msg) {
 
 // ── Event Listeners ─────────────────────────────────────────────────────────
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  const savedHandle = await loadVaultHandleFromIdb();
+  if (savedHandle) {
+    vaultDirHandle = savedHandle;
+    currentVaultName = savedHandle.name || currentVaultName;
+    updateBrowserVaultBadge();
+  }
   connectToNativeHost();
   detectActiveTab();
 
+  if (btnPickVault) {
+    btnPickVault.addEventListener("click", () => {
+      pickVaultDirectory();
+    });
+  }
+
   hostBadge.addEventListener("click", () => {
+    if (!isNativeHostOnline && !vaultDirHandle && typeof window !== "undefined" && typeof window.showDirectoryPicker === "function") {
+      pickVaultDirectory();
+      return;
+    }
     connectToNativeHost();
     if (currentArticleData) {
       sendNativeMessage("check_status", {

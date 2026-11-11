@@ -11,7 +11,7 @@
 
 ### 2. Data Collection & Storage
 - **No Remote Analytics or Tracking:** This extension does **not** collect, transmit, sell, or store any personal data, browsing history, or telemetry on developer-operated servers.
-- **Local Processing Only:** Extracted article text, metadata, and clipboard notes are processed locally within the browser or sent directly via Chrome Native Messaging (`stdio`) to the user's own local Python Native Host (`com.ob.zotero.ingest`) to write Markdown/PDF files into the user's local Obsidian Vault directory.
+- **Local Processing Only:** Extracted article text, metadata, and clipboard notes are processed locally within the browser — written directly to a user-selected local folder via the browser's native File System Access API (`window.showDirectoryPicker`), or sent via Chrome Native Messaging (`stdio`) to the user's own local Python Native Host (`com.ob.zotero.ingest`) to write Markdown/PDF files into the user's local Obsidian Vault directory.
 - **No Cookie Exfiltration:** The extension does **not** read `document.cookie` or use the `chrome.cookies` API, and never exports browser session cookies outside the browser.
 
 ### 3. External API Requests (Initiated by Local Host Only When Configured)

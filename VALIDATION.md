@@ -11,7 +11,7 @@
 - 在空白 HOME、`PATH=/usr/bin:/bin`（找不到 uv）、沒有 API Key 的環境執行 `install.sh`，透過 pip 下載並安裝 17 個鎖定套件。
 - uv 安裝路徑及依賴一致性檢查亦通過。
 - 11 項 Python 整合測試通過：已安裝 launcher 的 Native Messaging 協定往返、空白庫狀態、合成來源與筆記寫入／frontmatter 保留、Markdown 不等號與 PDF 斷行修復、HTML 行內格式與表格保留、YAML 引號跳脫與複雜 DOI 檔名對齊、預印本離線比對與 Zotero 本地回連識別、CrossRef/PubMed 書目合併快取、PDF 分塊及 inspection cache、既有 Host 覆蓋保護、ID 驗證、路徑跳脫保護與 Chrome Web Store 打包驗證。
-- 6 項 JavaScript 測試通過（含 JAMA 圖表擷取、包裹表格去重、無 Cookie 洩漏、付費牆攔截、PDF 檢視器 PMID 對齊與自訂 Vault URI／純瀏覽器 Markdown 產生）。
+- 7 項 JavaScript 測試通過（含 JAMA 圖表擷取、包裹表格去重、無 Cookie 洩漏、付費牆攔截、PDF 檢視器 PMID 對齊、自訂 Vault URI／純瀏覽器 Markdown 產生，以及瀏覽器原生 File System Access API 免安裝 Python 直連寫入 Obsidian Vault 全文／圖表／PDF／閱讀筆記與 frontmatter 保留測試）。
 - ZIP 可建立，`manifest.json` 在根目錄，只含 9 個瀏覽器必要檔案，且已移除開發用 `"key"`、`cookies` 權限與安裝期 `<all_urls>` 權限。
 
 以上以本機模擬乾淨使用者環境，並非重新安裝 macOS 或另一台實體電腦。
@@ -24,6 +24,7 @@
 - 執行期設定、日誌和狀態原本與原始碼／Vault 混放，現改為獨立設定目錄。
 - 空白 macOS HOME 的 pip system truststore 發生 `OSStatus -26276`；改用 pip 的 bundled CA，沒有關閉 HTTPS 驗證。依據：[pip 官方憑證文件](https://pip.pypa.io/en/stable/topics/https-certificates/)。
 - 移除未使用的 Chrome `storage` 與 `cookies` 權限，將 `<all_urls>` 改為 `optional_host_permissions`，加入最低 Chrome 版本與免本地端「複製結構化全文 Markdown」功能，並補齊 [PRIVACY.md](PRIVACY.md)、[CHROME_WEB_STORE.md](CHROME_WEB_STORE.md) 與 [bug_check_by_gemini.md](bug_check_by_gemini.md) 全部 11 項程式碼修正。
+- 實作瀏覽器原生 **File System Access API (`window.showDirectoryPicker` + `IndexedDB`)**：使用者未安裝本地 Python Host 時，可直接點選側欄「📂 選擇 Vault 資料夾」，在瀏覽器內直接將論文全文 Markdown、高解析度圖表、PDF 及閱讀筆記（保留 YAML frontmatter）寫入本地 Obsidian Vault。
 
 ## 尚未驗證
 

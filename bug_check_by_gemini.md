@@ -135,3 +135,17 @@ Status: **All 11 bugs resolved and verified with automated tests; Chrome Web Sto
   Uses `from ingestion.identifier import ...` instead of relative imports `from .identifier import ...` (unlike all other modules in `scripts/ingestion/`).
 - **Impact**:
   Importing `scripts.ingestion.gemini_client` from the repository root without `scripts/` on `sys.path` raises `ModuleNotFoundError: No module named 'ingestion'`.
+
+---
+
+## Resolution & Feature Progress (2026-11-11)
+
+- **All 11 Bugs (#1–#11) Resolved & Verified**:
+  - Covered by `11` Python integration tests (`tests/test_clean_install.py`) and `7` JavaScript unit tests (`chrome-extension/tests/`).
+- **Chrome Web Store Submission Readiness**:
+  - Removed `"cookies"` permission and `document.cookie` exfiltration; replaced `"<all_urls>"` with `activeTab` + on-demand `optional_host_permissions`.
+  - Updated `scripts/package_extension.py` to strip development `"key"` when generating `dist/ob-zotero-1.0.0.zip`.
+  - Added [PRIVACY.md](PRIVACY.md) and [CHROME_WEB_STORE.md](CHROME_WEB_STORE.md).
+- **Zero-Python Browser File System Access API Mode (`📂 選擇 Vault 資料夾`)**:
+  - Implemented `window.showDirectoryPicker` + `IndexedDB` directory handle persistence in `chrome-extension/sidepanel.js` and `chrome-extension/sidepanel.html`.
+  - Users can now write structured Markdown (`Research/<Topic>/sources/`), high-resolution figures (`_assets/`), PDFs (`sources/etc/`), and reading notes (`notes/` with YAML frontmatter preservation) directly into their local Obsidian Vault in the browser without installing Python.

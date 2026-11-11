@@ -58,12 +58,13 @@ Run the packaging script to generate the store-ready ZIP:
 
 ## 3. Reviewer Testing Instructions (Copy & Paste into "Instructions for Reviewers")
 
-> **Testing Mode 1 — Browser-Only Mode (No Local Native Host Installation Required):**
+> **Testing Mode 1 — Browser-Only Mode (No Python or Local Native Host Installation Required):**
 > 1. Open any academic article page, for example on PubMed Central or JAMA Network (e.g., `https://pmc.ncbi.nlm.nih.gov/` or any article with standard `citation_title` / `citation_doi` meta tags).
 > 2. Click the **OB–Zotero Academic Ingestion** toolbar icon to open the Side Panel.
 > 3. The Side Panel automatically extracts and displays the article's Title, Authors, Journal, Year, DOI, and PMID.
-> 4. Click **"📋 複製結構化全文 Markdown"** (Copy Structured Full-Text Markdown). The extension generates the complete YAML frontmatter, abstract, structured headings, figure links, and Markdown tables and copies them directly to your clipboard (100% in-browser, without needing the companion Native Host).
-> 5. In the bottom card ("📝 匯入閱讀筆記"), paste any HTML or text into the textarea to verify the note editor UI.
+> 4. Click **"📂 選擇 Vault 資料夾"** (Select Vault Folder) in the status card and select any local folder on your computer using Chrome's native File System Access API picker (`window.showDirectoryPicker`). The status badge will change to **"● 瀏覽器直連: <FolderName>"**.
+> 5. Click **"🚀 一鍵入庫至本地庫"** (Ingest to Local Vault) to directly write the structured Markdown source (`Research/<Topic>/sources/<stem>.md`), high-resolution figures (`_assets/<stem>/`), and PDF (`sources/etc/<stem>.pdf`) into your selected local folder — 100% in the browser without installing Python.
+> 6. You can also click **"📋 複製結構化全文 Markdown"** (Copy Structured Full-Text Markdown) to copy the formatted Markdown directly to your clipboard, or use the bottom card ("📝 匯入閱讀筆記") to write reading notes directly into `Research/<Topic>/notes/<stem>.md`.
 >
 > **Testing Mode 2 — Optional Local Native Host Mode (macOS / Linux):**
 > 1. Clone the companion repository and run `./install.sh --vault /path/to/empty/vault --extension-id <cws-extension-id>`.

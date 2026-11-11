@@ -74,5 +74,5 @@ Gemini 為選用功能；沒有憑證也能啟動。設定位置是專案的執�
 輸出 `dist/ob-zotero-1.0.0.zip`。ZIP 僅包含瀏覽器端必要檔案，不包含本地 Host、測試、憑證或 `.venv`，且自動移除開發用 `"key"` 欄位以符合 Chrome Web Store 新上架規範（本地 `chrome-extension/manifest.json` 仍保留 `"key"` 供開發模式固定 ID 使用；若需保留可加 `--keep-key`）。
 
 - **最小權限與無 Cookie 外傳**：移除 `cookies` 權限與 `document.cookie` 擷取，將安裝期 `<all_urls>` 改為 `activeTab` 搭配按需請求之 `optional_host_permissions`。
-- **免本地端瀏覽器獨立模式**：即使尚未安裝本地 Python Host，側欄仍可直接解析學術網頁書目並一鍵「📋 複製結構化全文 Markdown」。
+- **免安裝 Python 瀏覽器直連模式（File System Access API）**：未安裝本地 Python Host 時，可直接點選側欄的「📂 選擇 Vault 資料夾」，授權本地 Obsidian Vault 目錄後，即可在瀏覽器內直接執行「🚀 一鍵入庫至本地庫」（寫入 `Research/<主題>/sources/`、下載高解析度圖表至 `_assets/`、下載原廠或 Open Access PDF 至 `sources/etc/`）與「💾 寫入 Obsidian 筆記」（支援自動保留 YAML frontmatter），亦可一鍵「📋 複製結構化全文 Markdown」。
 - **隱私權政策與送審指南**：完整中英雙語隱私權政策見 [PRIVACY.md](PRIVACY.md)；Chrome Web Store 欄位填寫說明、權限理由與審查員測試指引見 [CHROME_WEB_STORE.md](CHROME_WEB_STORE.md)。
