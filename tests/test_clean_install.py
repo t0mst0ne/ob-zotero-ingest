@@ -80,6 +80,20 @@ class CleanInstallTests(unittest.TestCase):
         self.assertFalse(reply['obsidian']['has_note'])
         self.assertFalse(reply['pdf']['has_pdf'])
 
+    def test_pdf_inspection_errors_preserve_detection_generation(self):
+        # Missing files fail before metadata requests or OCR. Both normal and
+        # exceptional responses must retain the caller's detection generation.
+        normal, exceptional = self.exchange(
+            {'action': 'inspect_pdf', 'payload': {
+                'downloaded_file_path': str(self.base / 'missing.pdf'), 'detect_generation': 7}},
+            {'action': 'inspect_pdf', 'payload': {
+                'downloaded_file_path': ['invalid path type'], 'detect_generation': 8}},
+        )
+        for reply, generation in [(normal, 7), (exceptional, 8)]:
+            self.assertEqual(reply['status'], 'error')
+            self.assertTrue(reply['pdf_inspection'])
+            self.assertEqual(reply['detect_generation'], generation)
+
     def test_ingest_source_and_update_note_preserves_frontmatter(self):
         reply, = self.exchange({'action': 'ingest_webpage', 'payload': {
             'metadata': {'title': 'Clean install example', 'authors': 'Tester A.', 'year': 2026,

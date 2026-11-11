@@ -1103,7 +1103,10 @@ class NativeHostHandler:
             if action == "ping":
                 return self.handle_ping(payload)
             elif action == "inspect_pdf":
-                return self.handle_inspect_pdf(payload)
+                response = self.handle_inspect_pdf(payload)
+                if "detect_generation" in payload:
+                    response["detect_generation"] = payload["detect_generation"]
+                return response
             elif action == "check_status":
                 return self.handle_check_status(payload)
             elif action == "ingest_webpage":
@@ -1126,6 +1129,10 @@ class NativeHostHandler:
                 return {"status": "error", "message": f"Unknown action: {action}"}
         except Exception as e:
             logging.exception(f"Error handling action '{action}': {e}")
+            if action == "inspect_pdf":
+                return {"status": "error", "pdf_inspection": True,
+                        "detect_generation": payload.get("detect_generation"),
+                        "message": f"處理出錯: {str(e)}"}
             return {"status": "error", "message": f"處理出錯: {str(e)}"}
 
 

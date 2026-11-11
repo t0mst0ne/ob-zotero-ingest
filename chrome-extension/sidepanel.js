@@ -12,6 +12,7 @@ let isNativeHostOnline = false;
 let vaultDirHandle = null;
 let currentArticleData = null;
 let isIngesting = false;
+let activeIngestion = null;
 let currentVaultName = "OB";
 
 // DOM Elements
@@ -343,6 +344,7 @@ function handleNativeResponse(msg) {
     return;
   }
   if (msg.pdf_inspection) {
+    if (msg.detect_generation !== undefined && msg.detect_generation !== detectGeneration) return;
     if (msg.status !== "ok") {
       showEmpty(msg.message || "無法辨識 PDF 書目資料。");
       return;
@@ -539,7 +541,7 @@ async function detectActiveTab(fromUserGesture = false) {
 
     // Chrome's built-in PDF viewer does not expose publisher citation meta tags.
     if (isPdfTabUrl(url)) {
-      await inspectPdfTab(tab);
+      await inspectPdfTab(tab, stillCurrent, generation);
       return;
     }
 
@@ -557,7 +559,9 @@ async function detectActiveTab(fromUserGesture = false) {
         return;
       }
       // Only the origin we already resolved. Never a wildcard host pattern.
-      if (fromUserGesture && await requestTabOriginPermission(url)) {
+      const granted = fromUserGesture && await requestTabOriginPermission(url);
+      if (!stillCurrent()) return;
+      if (granted) {
         results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           files: ["content_script.js"],
@@ -572,8 +576,9 @@ async function detectActiveTab(fromUserGesture = false) {
     if (results && results[0] && results[0].result) {
       const data = results[0].result;
       const meta = data.metadata || {};
-      if (!meta.title && !meta.doi && !meta.pmid && await presentIdentifierFallback(url)) {
-        return;
+      if (!meta.title && !meta.doi && !meta.pmid) {
+        const presented = await presentIdentifierFallback(url, stillCurrent);
+        if (!stillCurrent() || presented) return;
       }
       currentArticleData = data;
       renderArticle(data);
@@ -586,8 +591,9 @@ async function detectActiveTab(fromUserGesture = false) {
         url: data.metadata.url,
         topic: topicSelect ? topicSelect.value : "Neurology",
       });
-    } else if (!(await presentIdentifierFallback(url))) {
-      showEmpty("未能從當前網頁中解析出學術論文資訊。");
+    } else {
+      const presented = await presentIdentifierFallback(url, stillCurrent);
+      if (stillCurrent() && !presented) showEmpty("未能從當前網頁中解析出學術論文資訊。");
     }
   } catch (err) {
     console.error("Detection error:", err);
@@ -820,10 +826,11 @@ async function fetchBibliographicMetadata(ids) {
   };
 }
 
-async function presentIdentifierFallback(pageUrl) {
+async function presentIdentifierFallback(pageUrl, stillCurrent = () => true) {
   const ids = extractArticleIdsFromUrl(pageUrl);
   if (!ids.doi && !ids.pmid && !ids.pmcid) return false;
   const meta = await fetchBibliographicMetadata(ids);
+  if (!stillCurrent()) return false;
   if (!meta || (!meta.title && !meta.doi && !meta.pmid)) return false;
   const metadata = {
     title: meta.title || "",
@@ -860,7 +867,7 @@ function warnPdfFetchFailure(label, error) {
   console.warn(label, error);
 }
 
-function queueInspectionPdf(base64, url) {
+function queueInspectionPdf(base64, url, generation) {
   const chunkSize = 400 * 1024;
   const totalChunks = Math.ceil(base64.length / chunkSize);
   const transferId = `inspect_${Date.now()}`;
@@ -873,10 +880,10 @@ function queueInspectionPdf(base64, url) {
       inspection: true,
     });
   }
-  sendNativeMessage("inspect_pdf", { uploaded_transfer_id: transferId, url });
+  sendNativeMessage("inspect_pdf", { uploaded_transfer_id: transferId, url, detect_generation: generation });
 }
 
-async function inspectPdfTab(tab) {
+async function inspectPdfTab(tab, stillCurrent = () => true, generation = detectGeneration) {
   showEmpty("正在取得 PDF 並辨識書目資料...");
   let captureFailure = "目前工作階段無法直接讀取 PDF";
   // Fetch in the browser session first so publisher cookies and referer rules
@@ -906,8 +913,9 @@ async function inspectPdfTab(tab) {
       },
       args: [tab.url],
     });
+    if (!stillCurrent()) return;
     if (capture && capture.result && capture.result.ok && capture.result.base64) {
-      queueInspectionPdf(capture.result.base64, tab.url);
+      queueInspectionPdf(capture.result.base64, tab.url, generation);
       return;
     }
     captureFailure = capture && capture.result && capture.result.reason || captureFailure;
@@ -916,10 +924,12 @@ async function inspectPdfTab(tab) {
     warnPdfFetchFailure("PDF fetch in publisher tab failed:", error);
   }
 
+  if (!stillCurrent()) return;
   // The PDF viewer may block script injection. Try from the extension context
   // with the user's browser cookies before falling back to downloads.download.
   try {
     const response = await fetch(tab.url, { credentials: "include", cache: "no-store" });
+    if (!stillCurrent()) return;
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const blob = await response.blob();
     const header = new Uint8Array(await blob.slice(0, 1024).arrayBuffer());
@@ -932,13 +942,15 @@ async function inspectPdfTab(tab) {
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(blob);
     });
-    queueInspectionPdf(dataUrl.split(",", 2)[1], tab.url);
+    if (!stillCurrent()) return;
+    queueInspectionPdf(dataUrl.split(",", 2)[1], tab.url, generation);
     return;
   } catch (error) {
     captureFailure = String(error && (error.message || error) || error);
     warnPdfFetchFailure("PDF fetch in extension context failed:", error);
   }
 
+  if (!stillCurrent()) return;
   let downloadId;
   let downloadFailure = null;
   try {
@@ -951,8 +963,10 @@ async function inspectPdfTab(tab) {
   } catch (error) {
     downloadFailure = error;
   }
+  if (!stillCurrent()) return;
   if (!downloadId) {
-    if (await presentIdentifierFallback(tab.url)) return;
+    const presented = await presentIdentifierFallback(tab.url, stillCurrent);
+    if (!stillCurrent() || presented) return;
     const downloadMessage = downloadFailure ? (downloadFailure.message || downloadFailure) : "無法下載目前的 PDF。";
     throw new Error(`PDF 無法取得。瀏覽器工作階段：${captureFailure}；Chrome 下載：${downloadMessage}`);
   }
@@ -981,10 +995,13 @@ async function inspectPdfTab(tab) {
       chrome.downloads.onChanged.addListener(onChanged);
     });
   } catch (error) {
-    if (await presentIdentifierFallback(tab.url)) return;
+    if (!stillCurrent()) return;
+    const presented = await presentIdentifierFallback(tab.url, stillCurrent);
+    if (!stillCurrent() || presented) return;
     throw error;
   }
-  sendNativeMessage("inspect_pdf", { downloaded_file_path: filePath, url: tab.url });
+  if (!stillCurrent()) return;
+  sendNativeMessage("inspect_pdf", { downloaded_file_path: filePath, url: tab.url, detect_generation: generation });
 }
 
 function renderArticle(data) {
@@ -1009,7 +1026,7 @@ function renderArticle(data) {
     }
   }
 
-  btnIngest.disabled = false;
+  btnIngest.disabled = isIngesting;
   if (btnCopyMd) btnCopyMd.disabled = false;
 }
 
@@ -1438,7 +1455,25 @@ async function fetchPdfBytesForBrowserVault(pdfUrl, doi) {
   return null;
 }
 
-async function ingestViaBrowserFileSystem() {
+function createIngestionContext() {
+  return {
+    article: currentArticleData,
+    // Extraction data is JSON. Copy it before any awaits so tab detection and
+    // status replies cannot change an import that is already in progress.
+    data: JSON.parse(JSON.stringify(currentArticleData)),
+    options: {
+      topic: topicSelect ? topicSelect.value : "Neurology",
+      save_source: optSource ? optSource.checked : false,
+      download_figures: optFigures ? optFigures.checked : true,
+      download_pdf: optPdf ? optPdf.checked : true,
+      save_note: false,
+      save_zotero: optZotero ? optZotero.checked : false,
+    },
+  };
+}
+
+async function ingestViaBrowserFileSystem(ingestion = createIngestionContext()) {
+  const article = ingestion.data;
   if (!vaultDirHandle) {
     const picked = await pickVaultDirectory();
     if (!picked) {
@@ -1453,18 +1488,18 @@ async function ingestViaBrowserFileSystem() {
   }
 
   try {
-    const topic = topicSelect ? topicSelect.value : "Neurology";
-    const saveSource = optSource ? optSource.checked : false;
-    const shouldDownloadPdf = optPdf ? optPdf.checked : true;
-    const shouldDownloadFigures = optFigures ? optFigures.checked : true;
+    const topic = ingestion.options.topic;
+    const saveSource = ingestion.options.save_source;
+    const shouldDownloadPdf = ingestion.options.download_pdf;
+    const shouldDownloadFigures = ingestion.options.download_figures;
 
-    const meta = Object.assign({}, currentArticleData.metadata || {});
+    const meta = Object.assign({}, article.metadata || {});
     if (!meta.citekey) meta.citekey = generateCitekeyInBrowser(meta);
     const stem = computeStem(meta);
 
     const sourcesDir = await getSubDirHandle(vaultDirHandle, ["Research", topic, "sources"], true);
     const pdfsDir = await getSubDirHandle(vaultDirHandle, ["Research", topic, "sources", "etc"], true);
-    const figures = currentArticleData.figures || [];
+    const figures = article.figures || [];
     const downloadedFigs = [];
 
     // 1. Download Figures
@@ -1516,11 +1551,11 @@ async function ingestViaBrowserFileSystem() {
     if (saveSource && sourcesDir) {
       const articleForMd = {
         metadata: meta,
-        sections: currentArticleData.sections || [],
+        sections: article.sections || [],
         figures: downloadedFigs.length > 0
           ? downloadedFigs.map((f) => ({ src: f.local_rel_path, label: f.label, caption: f.caption }))
           : figures,
-        tables: currentArticleData.tables || [],
+        tables: article.tables || [],
       };
       const mdText = buildStructuredMarkdown(articleForMd, topic, {
         citekey: meta.citekey,
@@ -1551,7 +1586,7 @@ async function ingestViaBrowserFileSystem() {
       },
       note: { created: false, updated: false },
       zotero: { key: null, url: null },
-    });
+    }, ingestion);
   } catch (err) {
     console.error("Browser File System ingestion error:", err);
     showError(`瀏覽器直連寫入失敗: ${err.message || err}`);
@@ -1561,6 +1596,9 @@ async function ingestViaBrowserFileSystem() {
 async function startIngestion() {
   if (!currentArticleData || isIngesting) return;
 
+  const ingestion = createIngestionContext();
+  const article = ingestion.data;
+  activeIngestion = ingestion;
   isIngesting = true;
   btnIngest.disabled = true;
   resultCard.classList.remove("hidden");
@@ -1570,24 +1608,24 @@ async function startIngestion() {
 
   // Use zero-Python Browser File System Access API mode when Native Host is not connected
   if (!nativePort && !isNativeHostOnline && (vaultDirHandle || (typeof window !== "undefined" && typeof window.showDirectoryPicker === "function"))) {
-    await ingestViaBrowserFileSystem();
+    await ingestViaBrowserFileSystem(ingestion);
     return;
   }
 
-  const figCount = currentArticleData.figures ? currentArticleData.figures.length : 0;
-  const topic = topicSelect.value;
-  const pdfUrl = currentArticleData.metadata ? currentArticleData.metadata.pdf_url : null;
-  const shouldDownloadPdf = optPdf ? optPdf.checked : true;
-  const stem = computeStem(currentArticleData.metadata);
+  const figCount = article.figures ? article.figures.length : 0;
+  const topic = ingestion.options.topic;
+  const pdfUrl = article.metadata ? article.metadata.pdf_url : null;
+  const shouldDownloadPdf = ingestion.options.download_pdf;
+  const stem = computeStem(article.metadata);
 
   // In-browser PDF capture if PDF URL is available
-  let dlResult = shouldDownloadPdf && currentArticleData.downloaded_file_path
-    ? { ok: true, downloadedFilePath: currentArticleData.downloaded_file_path }
+  let dlResult = shouldDownloadPdf && article.downloaded_file_path
+    ? { ok: true, downloadedFilePath: article.downloaded_file_path }
     : null;
   if (!dlResult && shouldDownloadPdf && pdfUrl) {
     progressText.textContent = "正在透過瀏覽器工作階段安全下載論文 PDF...";
     try {
-      dlResult = await downloadAndUploadPdf(pdfUrl, currentArticleData.metadata, topic);
+      dlResult = await downloadAndUploadPdf(pdfUrl, article.metadata, topic);
       if (dlResult && dlResult.ok) {
         progressText.textContent = "PDF 已傳送，正在由本地端驗證並入庫...";
       }
@@ -1601,40 +1639,35 @@ async function startIngestion() {
   }
 
   const payload = {
-    metadata: currentArticleData.metadata,
-    sections: currentArticleData.sections,
-    figures: currentArticleData.figures,
-    tables: currentArticleData.tables,
+    metadata: article.metadata,
+    sections: article.sections,
+    figures: article.figures,
+    tables: article.tables,
     pdf_url: pdfUrl,
     stem: stem,
     uploaded_pdf_stem: dlResult && dlResult.uploadedStem ? dlResult.uploadedStem : null,
     downloaded_file_path: dlResult && dlResult.downloadedFilePath ? dlResult.downloadedFilePath : null,
     browser_pdf_failure: dlResult && dlResult.reason ? dlResult.reason : null,
-    options: {
-      topic: topic,
-      save_source: optSource.checked,
-      download_figures: optFigures.checked,
-      download_pdf: shouldDownloadPdf,
-      save_note: false,
-      save_zotero: optZotero.checked,
-    },
+    options: ingestion.options,
   };
 
   sendNativeMessage("ingest_webpage", payload);
 }
 
-function handleIngestionSuccess(res) {
+function handleIngestionSuccess(res, ingestion = activeIngestion) {
+  const article = ingestion ? ingestion.article : currentArticleData;
+  activeIngestion = null;
   isIngesting = false;
-  btnIngest.disabled = false;
+  btnIngest.disabled = !currentArticleData;
   progressSpinner.classList.add("hidden");
   resultSuccess.classList.remove("hidden");
 
-  if (currentArticleData) {
+  if (article) {
     if (res.metadata) {
-      currentArticleData.metadata = Object.assign({}, currentArticleData.metadata, res.metadata);
+      article.metadata = Object.assign({}, article.metadata, res.metadata);
     }
     if (res.stem) {
-      currentArticleData.ingested_stem = res.stem;
+      article.ingested_stem = res.stem;
     }
   }
 
@@ -1697,8 +1730,9 @@ function handleIngestionSuccess(res) {
 }
 
 function showError(msg) {
+  activeIngestion = null;
   isIngesting = false;
-  btnIngest.disabled = false;
+  btnIngest.disabled = !currentArticleData;
   progressSpinner.classList.add("hidden");
   resultError.classList.remove("hidden");
   errorText.textContent = msg;
