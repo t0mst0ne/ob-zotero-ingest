@@ -27,6 +27,7 @@ const artTitle = document.getElementById("art-title");
 const artMeta = document.getElementById("art-meta");
 const artDoi = document.getElementById("art-doi");
 const artPmid = document.getElementById("art-pmid");
+const pdfFetchNote = document.getElementById("pdf-fetch-note");
 
 const statusNote = document.getElementById("status-note");
 const statusSource = document.getElementById("status-source");
@@ -290,10 +291,18 @@ function connectToNativeHost() {
 
     nativePort.onDisconnect.addListener(() => {
       const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : "Disconnected";
-      console.warn("Native host disconnected:", err);
+      const wasOnline = isNativeHostOnline;
       isNativeHostOnline = false;
       nativePort = null;
       updateBrowserVaultBadge();
+      // Browser-only File System Access mode is expected to run with no host
+      // installed. connectNative then disconnects immediately ("Specified native
+      // messaging host not found."). That is not a session failure — stay quiet
+      // and let the panel fall back to the vault-folder badge. Warn only if a
+      // host that had already answered ping drops mid-session.
+      if (wasOnline) {
+        console.warn("Native host disconnected:", err);
+      }
       if (isIngesting && !vaultDirHandle) {
         showError("本地入庫進程通訊已結束。");
       }
@@ -392,7 +401,116 @@ async function requestTabOriginPermission(url) {
   }
 }
 
+// Chrome omits tab.url / tab.title / tab.pendingUrl unless this extension has
+// activeTab for that tab, a host permission for the origin, or the "tabs"
+// permission. "tabs" is not requested: it would expose every tab URL at
+// install time. The icon click grants activeTab and the service worker
+// remembers that one URL. A side-panel button cannot grant activeTab, so it
+// may request only an origin it already knows — never every website.
+const INTERNAL_PAGE_MESSAGE = "無法在瀏覽器系統頁面上擷取文獻。";
+const TAB_LOADING_MESSAGE = "正在讀取目前分頁…";
+const TAB_URL_UNAVAILABLE_HINT =
+  "無法讀取此分頁，因此無法檢測文獻。請再點一次擴充功能圖示，以授權目前這個分頁。若這是瀏覽器內部頁面，請改開一般網頁。";
+
+let detectGeneration = 0;
+
+function readTabUrl(tab) {
+  if (!tab) return "";
+  if (typeof tab.url === "string" && tab.url) return tab.url;
+  if (typeof tab.pendingUrl === "string" && tab.pendingUrl) return tab.pendingUrl;
+  return "";
+}
+
+function isInternalBrowserUrl(url) {
+  return url.startsWith("chrome://") ||
+    url.startsWith("chrome-extension://") ||
+    url.startsWith("chrome-untrusted://") ||
+    url.startsWith("edge://") ||
+    url.startsWith("about:") ||
+    url.startsWith("devtools://");
+}
+
+function isInternalScriptError(error) {
+  const message = String(error && (error.message || error) || "");
+  return /chrome:\/\/|chrome-extension:\/\/|chrome-untrusted:\/\/|edge:\/\/|devtools:\/\/|about:|Cannot access a chrome|extensions gallery cannot be scripted|cannot be scripted/i.test(message);
+}
+
+function originPermissionHint(url) {
+  let host = "";
+  try {
+    host = new URL(url).host;
+  } catch (e) {}
+  if (!host) return TAB_URL_UNAVAILABLE_HINT;
+  return `尚未允許讀取 ${host}。請點「🔄 重新整理」以只授權這個網站。`;
+}
+
+async function readInvokedTab() {
+  if (!chrome.runtime || typeof chrome.runtime.sendMessage !== "function") return null;
+  try {
+    const response = await chrome.runtime.sendMessage({ action: "get_invoked_tab" });
+    if (!response || !response.tab) return null;
+    return response.tab;
+  } catch (e) {
+    return null;
+  }
+}
+
+// activeTab lets the extension inject without tabs.query revealing url.
+// The page's location.href is the current origin; a chrome:// page fails with
+// a distinct error, which is how the panel recognizes internal pages without
+// the "tabs" permission.
+async function readPageUrl(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    return { url: "", internal: false };
+  }
+  try {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => location.href,
+    });
+    const href = injected && injected[0] && injected[0].result;
+    if (typeof href === "string" && href) return { url: href, internal: isInternalBrowserUrl(href) };
+    return { url: "", internal: false };
+  } catch (error) {
+    return { url: "", internal: isInternalScriptError(error) };
+  }
+}
+
+async function resolveActiveTab() {
+  const queried = await chrome.tabs.query({ active: true, currentWindow: true });
+  let tab = queried && queried[0];
+  if (!tab || !tab.id) return { tab: null, url: "", internal: false };
+
+  let url = readTabUrl(tab);
+  let internal = Boolean(url) && isInternalBrowserUrl(url);
+
+  if (!url) {
+    const invoked = await readInvokedTab();
+    if (invoked && invoked.id === tab.id) url = readTabUrl(invoked);
+    if (url && isInternalBrowserUrl(url)) internal = true;
+  }
+
+  // Prefer the live page over a URL captured at the last icon click.
+  if (!url || !internal) {
+    const probed = !url ? await readPageUrl(tab.id) : null;
+    if (probed && probed.internal) {
+      internal = true;
+      url = probed.url || url;
+    } else if (probed && probed.url) {
+      url = probed.url;
+      internal = isInternalBrowserUrl(url);
+    }
+  }
+
+  if (url && tab.url !== url) {
+    tab = Object.assign({}, tab, { url: url });
+  }
+  return { tab: tab, url: url, internal: internal };
+}
+
 async function detectActiveTab(fromUserGesture = false) {
+  const generation = ++detectGeneration;
+  const stillCurrent = () => generation === detectGeneration;
   if (!nativePort) {
     connectToNativeHost();
   }
@@ -400,19 +518,27 @@ async function detectActiveTab(fromUserGesture = false) {
   btnDetect.disabled = true;
 
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const resolved = await resolveActiveTab();
+    if (!stillCurrent()) return;
+    const tab = resolved.tab;
+    const url = resolved.url;
     if (!tab || !tab.id) {
       showEmpty("找不到目前啟用的瀏覽器分頁。");
       return;
     }
 
-    if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) {
-      showEmpty("無法在瀏覽器系統頁面上擷取文獻。");
+    if (resolved.internal || (url && isInternalBrowserUrl(url))) {
+      showEmpty(INTERNAL_PAGE_MESSAGE);
+      return;
+    }
+
+    if (!url) {
+      showEmpty(TAB_URL_UNAVAILABLE_HINT);
       return;
     }
 
     // Chrome's built-in PDF viewer does not expose publisher citation meta tags.
-    if (isPdfTabUrl(tab.url)) {
+    if (isPdfTabUrl(url)) {
       await inspectPdfTab(tab);
       return;
     }
@@ -425,18 +551,30 @@ async function detectActiveTab(fromUserGesture = false) {
         files: ["content_script.js"],
       });
     } catch (scriptErr) {
-      if (fromUserGesture && await requestTabOriginPermission(tab.url)) {
+      if (!stillCurrent()) return;
+      if (isInternalScriptError(scriptErr)) {
+        showEmpty(INTERNAL_PAGE_MESSAGE);
+        return;
+      }
+      // Only the origin we already resolved. Never a wildcard host pattern.
+      if (fromUserGesture && await requestTabOriginPermission(url)) {
         results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           files: ["content_script.js"],
         });
       } else {
-        throw scriptErr;
+        showEmpty(originPermissionHint(url));
+        return;
       }
     }
 
+    if (!stillCurrent()) return;
     if (results && results[0] && results[0].result) {
       const data = results[0].result;
+      const meta = data.metadata || {};
+      if (!meta.title && !meta.doi && !meta.pmid && await presentIdentifierFallback(url)) {
+        return;
+      }
       currentArticleData = data;
       renderArticle(data);
 
@@ -448,24 +586,278 @@ async function detectActiveTab(fromUserGesture = false) {
         url: data.metadata.url,
         topic: topicSelect ? topicSelect.value : "Neurology",
       });
-    } else {
+    } else if (!(await presentIdentifierFallback(url))) {
       showEmpty("未能從當前網頁中解析出學術論文資訊。");
     }
   } catch (err) {
     console.error("Detection error:", err);
-    showEmpty(`檢測出錯: ${err.message}`);
+    if (stillCurrent()) showEmpty(`檢測出錯: ${err.message}`);
   } finally {
+    if (stillCurrent()) {
+      btnDetect.textContent = "🔄 重新整理";
+      btnDetect.disabled = false;
+    }
+  }
+}
+
+function handleTabActivated() {
+  showEmpty(TAB_LOADING_MESSAGE);
+  return detectActiveTab(false);
+}
+
+async function handleTabUpdated(tabId, changeInfo) {
+  if (!changeInfo || !chrome.tabs || typeof chrome.tabs.query !== "function") return;
+  const started = changeInfo.status === "loading";
+  const finished = changeInfo.status === "complete" || typeof changeInfo.url === "string";
+  if (!started && !finished) return;
+  let activeId = null;
+  try {
+    const queried = await chrome.tabs.query({ active: true, currentWindow: true });
+    activeId = queried && queried[0] && queried[0].id;
+  } catch (e) {
+    return;
+  }
+  if (activeId !== tabId) return;
+  if (started && !finished) {
+    detectGeneration += 1;
+    showEmpty(TAB_LOADING_MESSAGE);
     btnDetect.textContent = "🔄 重新整理";
     btnDetect.disabled = false;
+    return;
   }
+  return detectActiveTab(false);
+}
+
+function registerTabWatchers() {
+  if (!chrome.tabs || registerTabWatchers.done) return;
+  registerTabWatchers.done = true;
+  if (chrome.tabs.onActivated && typeof chrome.tabs.onActivated.addListener === "function") {
+    chrome.tabs.onActivated.addListener(() => {
+      handleTabActivated();
+    });
+  }
+  if (chrome.tabs.onUpdated && typeof chrome.tabs.onUpdated.addListener === "function") {
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+      handleTabUpdated(tabId, changeInfo);
+    });
+  }
+}
+
+function registerRuntimeMessages() {
+  if (!chrome.runtime || !chrome.runtime.onMessage || typeof chrome.runtime.onMessage.addListener !== "function" || registerRuntimeMessages.done) return;
+  registerRuntimeMessages.done = true;
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.action !== "invoked_tab" || !message.tab) return;
+    detectActiveTab(false);
+  });
 }
 
 function isPdfTabUrl(url) {
   try {
     const path = new URL(url).pathname.toLowerCase();
     return path.endsWith(".pdf") || path.includes("/articlepdf/") ||
-      path.includes("/doi/pdf/") || path.includes("/pdf/");
+      path.includes("/doi/pdf") || path.includes("/pdfdirect/") ||
+      path.includes("/epdf/") || path.includes("/pdf/");
   } catch (_) { return false; }
+}
+
+// Mirrors scripts/native_host/native_host.py extract_doi_from_pdf_url, plus
+// PubMed / PMC ids that appear in viewer URLs. Percent-encoded slashes are
+// decoded first so 10.xxxx%2F... still matches.
+function decodeUrlForIdentifiers(url) {
+  let decoded = String(url || "");
+  for (let i = 0; i < 2; i++) {
+    try {
+      const next = decodeURIComponent(decoded.replace(/\+/g, " "));
+      if (next === decoded) break;
+      decoded = next;
+    } catch (e) {
+      break;
+    }
+  }
+  return decoded;
+}
+
+function normalizeExtractedDoi(raw) {
+  if (!raw) return "";
+  let value = String(raw).trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+  value = value.replace(/^doi:\s*/i, "");
+  value = value.replace(/[.,)]+$/g, "");
+  value = value.replace(/\.pdf$/i, "");
+  value = value.replace(/\/(?:pdfdirect|epdf|pdf|full|abs|abstract|html|suppl|supplementary)\/?$/i, "");
+  value = value.replace(/[.,)]+$/g, "");
+  const match = value.match(/10\.\d{4,9}\/[A-Za-z0-9._;()/:+-]+/);
+  if (!match) return "";
+  return match[0].replace(/[.,)]+$/g, "").replace(/\.pdf$/i, "").toLowerCase();
+}
+
+function extractDoiFromPdfUrl(url) {
+  const decoded = decodeUrlForIdentifiers(url);
+  const match = decoded.match(/10\.\d{4,9}\/[A-Za-z0-9._;()/:+-]+/);
+  if (!match) return "";
+  return normalizeExtractedDoi(match[0]);
+}
+
+function extractArticleIdsFromUrl(url) {
+  const decoded = decodeUrlForIdentifiers(url);
+  const doi = extractDoiFromPdfUrl(decoded);
+  let pmid = "";
+  const pmidMatch = decoded.match(/pubmed\.ncbi\.nlm\.nih\.gov\/(\d{6,9})/i) ||
+    decoded.match(/\/pubmed\/(\d{6,9})(?:[/?#]|$)/i) ||
+    decoded.match(/[?&]pmid=(\d{6,9})(?:[&#]|$)/i);
+  if (pmidMatch) pmid = pmidMatch[1];
+  let pmcid = "";
+  const pmcMatch = decoded.match(/\/pmc\/articles\/(PMC\d+)/i) ||
+    decoded.match(/[?&]pmcid=(PMC\d+)/i) ||
+    decoded.match(/europepmc\.org\/articles\/(PMC\d+)/i);
+  if (pmcMatch) pmcid = pmcMatch[1].toUpperCase();
+  return { doi: doi, pmid: pmid, pmcid: pmcid };
+}
+
+const PDF_FETCH_NOTE = "未能直接取得 PDF 檔（出版商可能拒絕瀏覽器抓取）。已改以網址中的 DOI／PMID 查詢書目。入庫時會再嘗試下載，您也可以自行下載後再入庫。";
+
+function formatCrossrefAuthors(authors) {
+  const parts = [];
+  for (const author of (authors || []).slice(0, 6)) {
+    const family = author && author.family ? String(author.family) : "";
+    const given = author && author.given ? String(author.given) : "";
+    if (family && given) parts.push(`${family} ${given.charAt(0)}.`);
+    else if (family) parts.push(family);
+  }
+  return parts.join(", ");
+}
+
+async function fetchCrossrefWork(doi) {
+  if (!doi || typeof fetch !== "function") return null;
+  try {
+    const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return null;
+    const body = await response.json();
+    const msg = body && body.message ? body.message : {};
+    const title = msg.title && msg.title[0] ? String(msg.title[0]) : "";
+    if (!title) return null;
+    const published = msg.published && msg.published["date-parts"] && msg.published["date-parts"][0];
+    const year = published && published[0] ? published[0] : null;
+    const journal = msg["container-title"] && msg["container-title"][0] ? msg["container-title"][0] : "";
+    return {
+      title: title,
+      authors: formatCrossrefAuthors(msg.author),
+      journal: journal,
+      year: year,
+      doi: String(msg.DOI || doi).toLowerCase(),
+      pmid: "",
+      abstract: String(msg.abstract || "").replace(/<[^>]+>/g, "").trim(),
+      url: msg.URL || "",
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchPubmedSummary(pmid) {
+  if (!pmid || typeof fetch !== "function") return null;
+  try {
+    const response = await fetch(
+      `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&id=${encodeURIComponent(pmid)}`,
+    );
+    if (!response.ok) return null;
+    const body = await response.json();
+    const data = body && body.result ? body.result[String(pmid)] : null;
+    if (!data || data.error || !data.title) return null;
+    const authors = (data.authors || []).slice(0, 6).map((author) => author && author.name).filter(Boolean).join(", ");
+    const pubdate = String(data.pubdate || "");
+    const year = /^\d{4}/.test(pubdate) ? Number(pubdate.slice(0, 4)) : null;
+    const doiItem = (data.articleids || []).find((item) => item && item.idtype === "doi");
+    return {
+      title: String(data.title).replace(/\.+$/, ""),
+      authors: authors,
+      journal: data.source || "",
+      year: year,
+      doi: doiItem && doiItem.value ? String(doiItem.value).toLowerCase() : "",
+      pmid: String(pmid),
+      abstract: "",
+      url: "",
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function findPubmedId(term) {
+  if (!term || typeof fetch !== "function") return "";
+  try {
+    const response = await fetch(
+      `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmode=json&retmax=1&term=${encodeURIComponent(term)}`,
+    );
+    if (!response.ok) return "";
+    const body = await response.json();
+    const id = body && body.esearchresult && body.esearchresult.idlist && body.esearchresult.idlist[0];
+    return id ? String(id) : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+async function fetchBibliographicMetadata(ids) {
+  const doi = ids && ids.doi ? ids.doi : "";
+  let pmid = ids && ids.pmid ? ids.pmid : "";
+  if (!pmid && ids && ids.pmcid) pmid = await findPubmedId(`${ids.pmcid}[pmcid]`);
+  const crossref = doi ? await fetchCrossrefWork(doi) : null;
+  if (!pmid && doi) pmid = await findPubmedId(`"${doi}"[DOI]`);
+  const pubmed = pmid ? await fetchPubmedSummary(pmid) : null;
+  if (!crossref && !pubmed && !doi && !pmid) return null;
+  return {
+    title: (pubmed && pubmed.title) || (crossref && crossref.title) || "",
+    authors: (pubmed && pubmed.authors) || (crossref && crossref.authors) || "",
+    journal: (pubmed && pubmed.journal) || (crossref && crossref.journal) || "",
+    year: (pubmed && pubmed.year) || (crossref && crossref.year) || null,
+    doi: (crossref && crossref.doi) || (pubmed && pubmed.doi) || doi,
+    pmid: (pubmed && pubmed.pmid) || pmid,
+    abstract: (crossref && crossref.abstract) || (pubmed && pubmed.abstract) || "",
+    url: (crossref && crossref.url) || "",
+  };
+}
+
+async function presentIdentifierFallback(pageUrl) {
+  const ids = extractArticleIdsFromUrl(pageUrl);
+  if (!ids.doi && !ids.pmid && !ids.pmcid) return false;
+  const meta = await fetchBibliographicMetadata(ids);
+  if (!meta || (!meta.title && !meta.doi && !meta.pmid)) return false;
+  const metadata = {
+    title: meta.title || "",
+    authors: meta.authors || "",
+    journal: meta.journal || "",
+    year: meta.year || null,
+    doi: meta.doi || ids.doi || "",
+    pmid: meta.pmid || ids.pmid || "",
+    abstract: meta.abstract || "",
+    url: pageUrl,
+    pdf_url: pageUrl,
+  };
+  currentArticleData = {
+    metadata: metadata,
+    sections: [],
+    figures: [],
+    tables: [],
+    pdfFetchNote: PDF_FETCH_NOTE,
+  };
+  renderArticle(currentArticleData);
+  sendNativeMessage("check_status", {
+    doi: metadata.doi,
+    pmid: metadata.pmid,
+    title: metadata.title,
+    url: metadata.url,
+    topic: topicSelect ? topicSelect.value : "Neurology",
+  });
+  return true;
+}
+
+function warnPdfFetchFailure(label, error) {
+  const message = String(error && (error.message || error) || "");
+  if (/\b403\b/.test(message)) return;
+  console.warn(label, error);
 }
 
 function queueInspectionPdf(base64, url) {
@@ -520,8 +912,8 @@ async function inspectPdfTab(tab) {
     }
     captureFailure = capture && capture.result && capture.result.reason || captureFailure;
   } catch (error) {
-    captureFailure = String(error);
-    console.warn("PDF fetch in publisher tab failed:", error);
+    captureFailure = String(error && (error.message || error) || error);
+    warnPdfFetchFailure("PDF fetch in publisher tab failed:", error);
   }
 
   // The PDF viewer may block script injection. Try from the extension context
@@ -543,11 +935,12 @@ async function inspectPdfTab(tab) {
     queueInspectionPdf(dataUrl.split(",", 2)[1], tab.url);
     return;
   } catch (error) {
-    captureFailure = String(error);
-    console.warn("PDF fetch in extension context failed:", error);
+    captureFailure = String(error && (error.message || error) || error);
+    warnPdfFetchFailure("PDF fetch in extension context failed:", error);
   }
 
   let downloadId;
+  let downloadFailure = null;
   try {
     downloadId = await chrome.downloads.download({
       url: tab.url,
@@ -556,31 +949,41 @@ async function inspectPdfTab(tab) {
       saveAs: false,
     });
   } catch (error) {
-    throw new Error(`PDF 無法取得。瀏覽器工作階段：${captureFailure}；Chrome 下載：${error.message || error}`);
+    downloadFailure = error;
   }
-  if (!downloadId) throw new Error("無法下載目前的 PDF。");
-  const filePath = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      chrome.downloads.onChanged.removeListener(onChanged);
-      reject(new Error("等待 PDF 下載逾時。"));
-    }, 60000);
-    function onChanged(delta) {
-      if (delta.id !== downloadId || !delta.state) return;
-      if (delta.state.current !== "complete" && delta.state.current !== "interrupted") return;
-      clearTimeout(timeout);
-      chrome.downloads.onChanged.removeListener(onChanged);
-      if (delta.state.current === "interrupted") {
-        const errorCode = delta.error && delta.error.current;
-        reject(new Error(`PDF 下載中斷${errorCode ? `（${errorCode}）` : ""}。瀏覽器工作階段抓取失敗：${captureFailure}`));
-      } else {
-        chrome.downloads.search({ id: downloadId }, (items) => {
-          const path = items && items[0] && items[0].filename;
-          path ? resolve(path) : reject(new Error("找不到下載的 PDF。"));
-        });
+  if (!downloadId) {
+    if (await presentIdentifierFallback(tab.url)) return;
+    const downloadMessage = downloadFailure ? (downloadFailure.message || downloadFailure) : "無法下載目前的 PDF。";
+    throw new Error(`PDF 無法取得。瀏覽器工作階段：${captureFailure}；Chrome 下載：${downloadMessage}`);
+  }
+  let filePath;
+  try {
+    filePath = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        chrome.downloads.onChanged.removeListener(onChanged);
+        reject(new Error("等待 PDF 下載逾時。"));
+      }, 60000);
+      function onChanged(delta) {
+        if (delta.id !== downloadId || !delta.state) return;
+        if (delta.state.current !== "complete" && delta.state.current !== "interrupted") return;
+        clearTimeout(timeout);
+        chrome.downloads.onChanged.removeListener(onChanged);
+        if (delta.state.current === "interrupted") {
+          const errorCode = delta.error && delta.error.current;
+          reject(new Error(`PDF 下載中斷${errorCode ? `（${errorCode}）` : ""}。瀏覽器工作階段抓取失敗：${captureFailure}`));
+        } else {
+          chrome.downloads.search({ id: downloadId }, (items) => {
+            const path = items && items[0] && items[0].filename;
+            path ? resolve(path) : reject(new Error("找不到下載的 PDF。"));
+          });
+        }
       }
-    }
-    chrome.downloads.onChanged.addListener(onChanged);
-  });
+      chrome.downloads.onChanged.addListener(onChanged);
+    });
+  } catch (error) {
+    if (await presentIdentifierFallback(tab.url)) return;
+    throw error;
+  }
   sendNativeMessage("inspect_pdf", { downloaded_file_path: filePath, url: tab.url });
 }
 
@@ -596,12 +999,26 @@ function renderArticle(data) {
 
   artDoi.textContent = meta.doi ? `DOI: ${meta.doi}` : "DOI: 無";
   artPmid.textContent = meta.pmid ? `PMID: ${meta.pmid}` : "PMID: 無";
+  if (pdfFetchNote) {
+    if (data.pdfFetchNote) {
+      pdfFetchNote.textContent = data.pdfFetchNote;
+      pdfFetchNote.classList.remove("hidden");
+    } else {
+      pdfFetchNote.textContent = "";
+      pdfFetchNote.classList.add("hidden");
+    }
+  }
 
   btnIngest.disabled = false;
   if (btnCopyMd) btnCopyMd.disabled = false;
 }
 
 function showEmpty(message) {
+  currentArticleData = null;
+  if (pdfFetchNote) {
+    pdfFetchNote.textContent = "";
+    pdfFetchNote.classList.add("hidden");
+  }
   articleEmpty.classList.remove("hidden");
   articleEmpty.querySelector("p").textContent = message;
   articleContent.classList.add("hidden");
@@ -1678,3 +2095,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     btnSaveNote.disabled = pasteContent.value.trim().length === 0;
   });
 });
+
+registerTabWatchers();
+registerRuntimeMessages();
