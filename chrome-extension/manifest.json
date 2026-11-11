@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "OB–Zotero Academic Ingestion",
+  "version": "1.0.0",
+  "description": "一鍵將學術論文（PMC, Nature, Lancet, Wiley, Springer 等）擷取為 Obsidian 結構化正文並對齊 Zotero 書目",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwdEtcAIhkTL1GsDHCgcE+kBngh9fna0mzNxRbvTRU5rskgNlkIwonuRrS8xc9LYcdWD1wm4+hEO31WxsZBndVr7L8PYG9+kqnh9XwFo84J7U0JtbrQTpWg/oJMDb6PK3mguLPQk0Mh8UCNbc37SnPcbIueEhwltX/NSmeyjjRvPT77rVWceTyR96HFK7ojzry8oEU95/r9cAh238TVjls+CqiTZqpDAX0CTzJxO/5LgCR6pa5zCZyk3le23DI7JJYTyXCphif6REkezD5C0vqu9T1CxVaTXM2t89yRp5AhNT9B3Zi/beN5TPZGy1TIVPqrR8Fn+iDDAuNMer0SwOQwIDAQAB",
+  "permissions": [
+    "sidePanel",
+    "nativeMessaging",
+    "activeTab",
+    "scripting",
+    "storage",
+    "clipboardRead",
+    "cookies",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "開啟 OB–Zotero 入庫側欄",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

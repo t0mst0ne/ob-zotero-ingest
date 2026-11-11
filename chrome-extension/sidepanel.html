@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OB–Zotero 文獻入庫側欄</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div class="header">
+    <div class="logo-area">
+      <div class="logo-icon"></div>
+      <div>
+        <h1 class="title">OB–Zotero</h1>
+        <p class="subtitle">學術論文結構化入庫核心</p>
+      </div>
+    </div>
+    <div id="host-badge" class="badge badge-disconnected">● 連線檢測中</div>
+  </div>
+
+  <!-- Article Detection Card -->
+  <div class="card" id="article-card">
+    <div class="card-header">
+      <span class="card-title">📄 當前頁面文獻</span>
+      <button id="btn-detect" class="btn-text">🔄 重新整理</button>
+    </div>
+
+    <div id="article-empty" class="empty-state">
+      <p>點擊「重新整理」以檢測當前分頁的學術文獻...</p>
+    </div>
+
+    <div id="article-content" class="hidden">
+      <h2 id="art-title" class="art-title">論文標題載入中...</h2>
+      <p id="art-meta" class="art-meta">作者 • 期刊 (年份)</p>
+      <div class="tags-container">
+        <span id="art-doi" class="tag tag-doi">DOI: -</span>
+        <span id="art-pmid" class="tag tag-pmid">PMID: -</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vault & Zotero Status Matrix -->
+  <div class="card" id="status-card">
+    <div class="card-header">
+      <span class="card-title">📊 本地文獻庫狀態對齊</span>
+    </div>
+    <div class="matrix-grid">
+      <div class="matrix-item">
+        <span class="matrix-label">📝 Obsidian 筆記</span>
+        <span id="status-note" class="matrix-val val-unknown">未核對</span>
+      </div>
+      <div class="matrix-item">
+        <span class="matrix-label">📑 來源全文快照</span>
+        <span id="status-source" class="matrix-val val-unknown">未核對</span>
+      </div>
+      <div class="matrix-item">
+        <span class="matrix-label">📄 論文原始 PDF</span>
+        <span id="status-pdf" class="matrix-val val-unknown">未核對</span>
+      </div>
+      <div class="matrix-item">
+        <span class="matrix-label">📚 Zotero 書目</span>
+        <span id="status-zotero" class="matrix-val val-unknown">未核對</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Options Card -->
+  <div class="card" id="options-card">
+    <div class="card-header">
+      <span class="card-title">⚙️ 入庫目標與選項</span>
+    </div>
+
+    <div class="form-group">
+      <label for="topic-select" class="form-label">研究主題分類目錄：</label>
+      <select id="topic-select" class="form-select">
+        <option value="Neurology" selected>Research/Neurology (神經醫學)</option>
+        <option value="AI">Research/AI (人工智慧)</option>
+        <option value="Cardiology">Research/Cardiology (心臟醫學)</option>
+        <option value="Endocrinology">Research/Endocrinology (內分泌與代謝)</option>
+        <option value="AI_Technology">Research/AI_Technology (AI與醫療科技)</option>
+        <option value="Infectious-Disease">Research/Infectious-Disease (感染醫學)</option>
+        <option value="ClinicalTrial">Research/ClinicalTrial (臨床試驗)</option>
+        <option value="Immunology">Research/Immunology (免疫學)</option>
+        <option value="Oncology">Research/Oncology (腫瘤醫學)</option>
+        <option value="Plant">Research/Plant (植物)</option>
+        <option value="digest">Research/digest (研究摘要)</option>
+      </select>
+    </div>
+
+    <div class="checkbox-group">
+      <label class="checkbox-item">
+        <input type="checkbox" id="opt-source">
+        <span>儲存結構化全文 Markdown (<code>sources/</code>)</span>
+      </label>
+      <label class="checkbox-item">
+        <input type="checkbox" id="opt-pdf" checked>
+        <span>尋找並下載論文原始 PDF (<code>sources/etc/</code>)</span>
+      </label>
+      <label class="checkbox-item">
+        <input type="checkbox" id="opt-figures" checked>
+        <span>下載高解析度圖表與圖說 (<code>sources/_assets/</code>)</span>
+      </label>
+      <label class="checkbox-item">
+        <input type="checkbox" id="opt-zotero" checked>
+        <span>對齊並登記至 Zotero 書目庫 (含 PDF 附件)</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Action & Progress Area -->
+  <div class="action-area">
+    <button id="btn-ingest" class="btn btn-primary" disabled>
+      🚀 一鍵入庫至本地庫
+    </button>
+  </div>
+
+  <!-- Result / Progress Card -->
+  <div id="result-card" class="card card-result hidden">
+    <div id="progress-spinner" class="spinner-container hidden">
+      <div class="spinner"></div>
+      <p id="progress-text" class="progress-text">正在分析文獻內容與下載圖表...</p>
+    </div>
+
+    <div id="result-success" class="hidden">
+      <div class="success-header">
+        <span class="success-icon">✅</span>
+        <h3 class="success-title">入庫成功！</h3>
+      </div>
+      <p id="result-desc" class="result-desc">文獻全文與結構化筆記已成功寫入指定目錄。</p>
+      <div class="result-links">
+        <a id="link-ob-note" href="#" class="btn btn-secondary">
+          📓 在 Obsidian 開啟筆記
+        </a>
+        <a id="link-ob-pdf" href="#" class="btn btn-secondary hidden">
+          📄 開啟原始 PDF
+        </a>
+        <a id="link-zotero" href="#" class="btn btn-secondary">
+          📚 在 Zotero 開啟書目
+        </a>
+      </div>
+    </div>
+
+    <div id="result-error" class="hidden">
+      <p id="error-text" class="error-text">入庫過程發生問題</p>
+    </div>
+  </div>
+
+  <!-- Import Gemini / Clipboard Note Card -->
+  <div class="card card-import">
+    <div class="card-header">
+      <span class="card-title">📝 匯入閱讀筆記 (剪貼簿)</span>
+    </div>
+    <p class="import-hint">
+      複製評讀文字或網頁/PDF 摘錄內容後，點此建立或更新閱讀筆記；更新時保留原有 frontmatter。
+    </p>
+
+    <div class="import-targets">
+      <label class="radio-label">
+        <input type="radio" name="import-target" value="note" checked>
+        <span>寫入閱讀筆記 (<code>notes/</code>)</span>
+      </label>
+      <label class="radio-label">
+        <input type="radio" name="import-target" value="translation">
+        <span>寫入翻譯底稿 (<code>-中文翻譯.md</code>)</span>
+      </label>
+    </div>
+
+    <div class="import-options">
+      <label class="checkbox-item small">
+        <input type="checkbox" id="opt-auto-html" checked>
+        <span>HTML 自動轉 Markdown</span>
+      </label>
+      <label class="checkbox-item small">
+        <input type="checkbox" id="opt-auto-pdf" checked>
+        <span>修復 PDF 斷行與連字號</span>
+      </label>
+    </div>
+
+    <div class="paste-box-container">
+      <textarea id="paste-content" class="paste-textarea" rows="3" placeholder="點擊「📋 讀取剪貼簿內容」或在此按 Cmd+V 貼上..."></textarea>
+    </div>
+
+    <div class="import-actions">
+      <button id="btn-paste-clip" class="btn btn-secondary btn-sm">
+        📋 讀取剪貼簿內容
+      </button>
+      <button id="btn-save-note" class="btn btn-primary btn-sm" disabled>
+        💾 寫入 Obsidian 筆記
+      </button>
+    </div>
+
+    <div id="paste-result" class="paste-result hidden">
+      <div class="paste-result-content">
+        <span id="paste-result-icon">✅</span>
+        <span id="paste-result-msg">筆記已成功寫入！</span>
+      </div>
+      <a id="link-paste-ob" href="#" class="btn btn-secondary btn-sm" style="text-align: center; text-decoration: none;">
+        📓 在 Obsidian 開啟筆記
+      </a>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
