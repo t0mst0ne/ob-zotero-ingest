@@ -6,7 +6,7 @@
 
 ## 安裝（macOS）
 
-需要 Python 3.10 以上（目前以 3.12 驗證）、Google Chrome。已安裝 uv 時，安裝器會自動建立 Python 3.12 環境；也可用 `PYTHON=/完整路徑/python3.12` 指定 Python。第一次安裝需要網路下載 Python／鎖定的套件。執行測試另需 Node.js。
+需要 Python 3.10 以上（目前以 3.12 驗證）、Google Chrome。已安裝 uv 時，安裝器會自動建立 Python 3.12 環境；也可用 `PYTHON=/完整路徑/python3.12` 指定 Python。第一次安裝需要網路下載 Python／鎖定的套件。執行 JavaScript 測試另需 Node.js。
 
 先在 Chrome 的 `chrome://extensions` 開啟「開發人員模式」，選「載入未封裝項目」，指定本專案的 `chrome-extension` 目錄。
 
@@ -18,7 +18,7 @@ mkdir -p "$HOME/GITHUB/OB-Zotero-Demo-Vault"
 
 `--vault` 必須是已存在的目錄。開啟空白目錄作為 Obsidian Vault 後，名稱預設使用該目錄名稱；可用 `--vault-name` 指定已登記的不同名稱。
 
-安裝器會建立本專案專用的 `.venv`，安裝 `requirements.txt`，再註冊 Chrome Native Host。Chrome 透過完整 Python 路徑啟動，不依賴 Anaconda、shell 啟動設定或啟用虛擬環境。
+安裝器會建立本專案專用的 `.venv`，安裝 `requirements.txt`，再註冊 Chrome Native Host。pip 安裝路徑使用其內建 CA bundle，避免空白 macOS HOME 的鑰匙圈存放區錯誤；HTTPS 憑證驗證仍保持啟用。Chrome 透過完整 Python 路徑啟動，不依賴 Anaconda、shell 啟動設定或啟用虛擬環境。
 
 如果 Chrome 已經註冊原 OB 的 Native Host，安裝器會停止，避免覆蓋。確定要切換到此專案時才加上 `--replace-host`；要保留原設定，使用下方隔離測試即可。
 
@@ -32,6 +32,14 @@ mkdir -p "$HOME/GITHUB/OB-Zotero-Demo-Vault"
 .venv/bin/python -I -m unittest discover -s tests -v
 node --test chrome-extension/tests/*.test.js
 ```
+
+也可從已提交的 Git 版本建立另一個全新 clone，使用空白 HOME、新 `.venv` 和 pip 重新下載套件後測試（不依賴 uv 或目前環境的 site-packages）：
+
+```sh
+.venv/bin/python -I scripts/verify_clean_clone.py
+```
+
+加上 `--keep` 可保留暫存 clone 和安裝 log。完整驗證結果與限制見 [VALIDATION.md](VALIDATION.md)。
 
 測試包含：從 Chrome 類似的最小 PATH 啟動 Host、Native Messaging 協定往返、空白庫狀態、寫入合成的全文與閱讀筆記、保留 frontmatter、PDF 分塊傳送、暫存 PDF、中文／空格／引號路徑、避免覆蓋其他 Host，以及阻擋目錄跳脫。
 
