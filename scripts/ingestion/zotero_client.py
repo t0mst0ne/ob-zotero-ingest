@@ -14,9 +14,9 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .models import PaperMetadata
+from .runtime_config import RUNTIME_DIR, get_zotero_dir, get_vault_root, get_vault_name
 
-DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / ".zotero_config.json"
-DEFAULT_LOCAL_STORAGE = Path("/Users/tomstone/Zotero/storage")
+DEFAULT_CONFIG_PATH = RUNTIME_DIR / "zotero.json"
 
 
 class ZoteroClient:
@@ -29,7 +29,8 @@ class ZoteroClient:
         timeout: int = 8,
     ):
         self.config_path = config_path or DEFAULT_CONFIG_PATH
-        self.local_storage_dir = local_storage_dir or DEFAULT_LOCAL_STORAGE
+        zotero_dir = get_zotero_dir()
+        self.local_storage_dir = local_storage_dir or (zotero_dir / "storage" if zotero_dir else None)
         self.local_api_base = f"http://localhost:{local_api_port}"
         self.prefer_local = prefer_local
         self.timeout = timeout
@@ -46,7 +47,10 @@ class ZoteroClient:
         self._local_doi_map: Dict[str, str] = {}
         self._local_pmid_map: Dict[str, str] = {}
         self._local_attachments_map: Dict[str, List[str]] = {}
-        sqlite_path = Path("/Users/tomstone/Zotero/zotero.sqlite")
+        zotero_dir = get_zotero_dir()
+        if zotero_dir is None:
+            return
+        sqlite_path = zotero_dir / "zotero.sqlite"
         if not sqlite_path.exists():
             return
         try:
@@ -111,7 +115,7 @@ class ZoteroClient:
         return bool(self.user_id and self.api_key)
 
     def get_status(self) -> Dict[str, Any]:
-        local_ok = self.is_local_api_available()
+        local_ok = bool(self.local_storage_dir) and self.is_local_api_available()
         web_ok = self.is_web_api_available()
         mode = "offline"
         if local_ok and self.prefer_local:
@@ -123,7 +127,7 @@ class ZoteroClient:
             "web_api": web_ok,
             "mode": mode,
             "user_id": self.user_id or None,
-            "local_storage_exists": self.local_storage_dir.exists(),
+            "local_storage_exists": bool(self.local_storage_dir and self.local_storage_dir.exists()),
         }
 
     # ── Search & Retrieval ───────────────────────────────────────────────────
@@ -285,7 +289,7 @@ class ZoteroClient:
                 return None
 
             # Copy PDF into local storage directory if storage dir exists
-            if self.local_storage_dir.exists():
+            if self.local_storage_dir and self.local_storage_dir.exists():
                 dest_dir = self.local_storage_dir / att_key
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest = dest_dir / pdf_path.name
@@ -296,7 +300,7 @@ class ZoteroClient:
         except Exception:
             return None
 
-    def add_obsidian_backlink(self, parent_key: str, note_path: Path, vault_name: str = "OB") -> Optional[str]:
+    def add_obsidian_backlink(self, parent_key: str, note_path: Path, vault_name: Optional[str] = None) -> Optional[str]:
         """
         Add a linked_url attachment to Zotero pointing back to the Obsidian note.
         URL format: obsidian://open?vault=OB&file=<relative_path>
@@ -306,13 +310,13 @@ class ZoteroClient:
 
         # Calculate relative path from vault root if possible
         try:
-            vault_root = Path(__file__).parent.parent.parent
+            vault_root = get_vault_root()
             rel_path = note_path.relative_to(vault_root).as_posix()
         except Exception:
             rel_path = note_path.name
 
         encoded_path = urllib.parse.quote(rel_path)
-        ob_uri = f"obsidian://open?vault={vault_name}&file={encoded_path}"
+        ob_uri = f"obsidian://open?vault={urllib.parse.quote(vault_name or get_vault_name(), safe='')}&file={encoded_path}"
 
         headers = {"Zotero-API-Key": self.api_key, "Content-Type": "application/json"}
         payload = [{

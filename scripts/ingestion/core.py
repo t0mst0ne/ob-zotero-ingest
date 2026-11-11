@@ -4,6 +4,7 @@ Unifies identification, matching, preview, execution, and resumability.
 """
 
 from pathlib import Path
+from .runtime_config import get_vault_root, get_vault_name
 from typing import Any, Dict, Optional
 
 from .identifier import extract_note_identity, extract_pdf_identity, normalize_doi
@@ -47,7 +48,7 @@ class IngestionCore:
     def apply_plan(
         self,
         plan: IngestPlan,
-        vault_name: str = "OB",
+        vault_name: Optional[str] = None,
         create_zotero_items: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -139,7 +140,7 @@ class IngestionCore:
                 if needs_backlink:
                     try:
                         link_key = self.zotero_client.add_obsidian_backlink(
-                            zotero_key, plan.note.path, vault_name=vault_name
+                            zotero_key, plan.note.path, vault_name=vault_name or get_vault_name()
                         )
                         if link_key:
                             results["backlink_added"] = True
@@ -172,7 +173,7 @@ class IngestionCore:
 
             if plan.pdf and "pdf" not in plan.note.existing_frontmatter:
                 try:
-                    vault_root = Path(__file__).parent.parent.parent
+                    vault_root = get_vault_root()
                     rel_pdf = plan.pdf.path.relative_to(vault_root).as_posix()
                     ob_updates["pdf"] = rel_pdf
                 except Exception:

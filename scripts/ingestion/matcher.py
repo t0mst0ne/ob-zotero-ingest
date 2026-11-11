@@ -4,6 +4,7 @@ Coordinates Note vs PDF cross-checking, Zotero querying, and change preview gene
 """
 
 from pathlib import Path
+from .runtime_config import get_vault_root
 from typing import Dict, List, Optional
 
 from .identifier import normalize_doi, normalize_pmid
@@ -364,7 +365,7 @@ def match_and_plan(
         if pdf and "pdf" not in note.existing_frontmatter:
             # Pair PDF in-place without moving
             try:
-                vault_root = Path(__file__).parent.parent.parent
+                vault_root = get_vault_root()
                 rel_pdf = pdf.path.relative_to(vault_root).as_posix()
                 planned_ob_updates["pdf"] = rel_pdf
             except Exception:

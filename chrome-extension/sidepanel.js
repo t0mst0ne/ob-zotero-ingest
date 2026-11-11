@@ -104,7 +104,7 @@ function sendNativeMessage(action, payload) {
       }, 150);
     }
   } else {
-    showError("無法連線至本地 Native Messaging Host，請確認已執行 install_host.py。");
+    showError("無法連線至本地 Native Messaging Host，請先依 README 執行 ./install.sh 並設定 Vault。");
   }
 }
 

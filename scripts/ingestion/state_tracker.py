@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .models import PaperState, StepStatus
+from .runtime_config import RUNTIME_DIR
 
-DEFAULT_STATE_FILE = Path(__file__).parent.parent / "ingest_state.json"
+DEFAULT_STATE_FILE = RUNTIME_DIR / "ingest_state.json"
 
 
 def _now_iso() -> str:
@@ -34,6 +35,7 @@ class IngestionStateTracker:
 
     def save(self) -> None:
         data = {pid: s.to_dict() for pid, s in self._states.items()}
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def get_state(self, paper_id: str) -> Optional[PaperState]:

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+dist/
+*.egg-info/
+scripts/.cache/
+scripts/.*config.json
+scripts/.env
+scripts/ingest_state.json

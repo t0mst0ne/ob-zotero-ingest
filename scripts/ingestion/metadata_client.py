@@ -37,14 +37,15 @@ def generate_citekey(meta: PaperMetadata) -> str:
 
 import json
 from pathlib import Path
+from .runtime_config import CACHE_DIR
 
-DEFAULT_METADATA_CACHE = Path(__file__).parent.parent / ".cache" / "metadata_cache.json"
+DEFAULT_METADATA_CACHE = CACHE_DIR / "metadata_cache.json"
 
 
 class MetadataClient:
     def __init__(
         self,
-        user_agent: str = "OBVault/2.0 (mailto:iamtomstone@gmail.com)",
+        user_agent: str = "OB-Zotero/1.0",
         timeout: int = 5,
         cache_file: Optional[Path] = None,
 

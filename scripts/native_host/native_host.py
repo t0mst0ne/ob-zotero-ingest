@@ -1,4 +1,4 @@
-#!/opt/anaconda3/bin/python3
+#!/usr/bin/env python3
 """
 OB-Zotero Native Messaging Host for Chrome Extension.
 Communicates via standard 4-byte length-prefixed JSON protocol over stdin/stdout.
@@ -28,6 +28,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import requests
 
+from ingestion.runtime_config import CACHE_DIR, get_vault_root, get_vault_name
 from ingestion.core import IngestionCore
 from ingestion.identifier import (
     calculate_file_hash,
@@ -47,8 +48,10 @@ from ingestion.zotero_client import ZoteroClient
 from ingestion.gemini_client import GeminiClient
 from ingestion.pdf_resolver import PDFResolver
 
-# Logging setup to a dedicated file in scripts/.cache/native_host.log
-LOG_DIR = SCRIPTS_DIR / ".cache"
+# Logs and runtime state live outside the project and the Vault.
+VAULT_DIR = get_vault_root()
+VAULT_NAME = urllib.parse.quote(get_vault_name(), safe="")
+LOG_DIR = CACHE_DIR
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "native_host.log"
 logging.basicConfig(
@@ -238,7 +241,7 @@ class NativeHostHandler:
         return {
             "status": "ok",
             "version": "1.0.0",
-            "vault_path": str(BASE_DIR),
+            "vault_path": str(VAULT_DIR),
             "zotero_mode": self.zotero_client.get_status().get("mode", "offline"),
             "zotero_indexed_dois": len(self.zotero_client._local_doi_map),
             "gemini": self.gemini_client.get_status(),
@@ -270,7 +273,7 @@ class NativeHostHandler:
 
         # 2. Check Obsidian Notes
         topic = payload.get("topic") or "Neurology"
-        topic_dir = BASE_DIR / "Research" / topic
+        topic_dir = VAULT_DIR / "Research" / topic
         notes_dir = topic_dir / "notes"
         ob_note_path = None
         ob_has_note = False
@@ -290,7 +293,7 @@ class NativeHostHandler:
 
                     if matched:
                         ob_has_note = True
-                        ob_note_path = str(n.relative_to(BASE_DIR))
+                        ob_note_path = str(n.relative_to(VAULT_DIR))
                         if n_id.zotero_link:
                             m_zk = re.search(r'/items/([A-Za-z0-9]+)', n_id.zotero_link)
                             if m_zk:
@@ -326,7 +329,7 @@ class NativeHostHandler:
                 candidates.extend(list(sources_dir.rglob(f"*{doi_clean}*.md")))
             if candidates:
                 ob_has_source = True
-                ob_source_path = str(candidates[0].relative_to(BASE_DIR))
+                ob_source_path = str(candidates[0].relative_to(VAULT_DIR))
 
         # 4. Check Obsidian PDFs (check sources/etc and all subdirectories under sources)
         ob_pdf_path = None
@@ -340,7 +343,7 @@ class NativeHostHandler:
                 candidates.extend(list(sources_dir.rglob(f"*{doi_clean}*.pdf")))
             if candidates:
                 ob_has_pdf = True
-                ob_pdf_path = str(candidates[0].relative_to(BASE_DIR))
+                ob_pdf_path = str(candidates[0].relative_to(VAULT_DIR))
 
         return {
             "status": "ok",
@@ -489,7 +492,7 @@ class NativeHostHandler:
             meta.citekey = generate_citekey(meta)
 
         # Determine file stems and directory paths
-        topic_dir = BASE_DIR / "Research" / topic
+        topic_dir = VAULT_DIR / "Research" / topic
         sources_dir = topic_dir / "sources"
         notes_dir = topic_dir / "notes"
         pdfs_dir = sources_dir / "etc"
@@ -636,7 +639,7 @@ class NativeHostHandler:
             if (inspection_copy.parent.name == "OB_Ingest" and
                     re.fullmatch(r"inspection_\d+(?: \(\d+\))?\.pdf", inspection_copy.name)):
                 inspection_copy.unlink(missing_ok=True)
-            elif (inspection_copy.parent == SCRIPTS_DIR / ".cache" / "OB_Ingest" and
+            elif (inspection_copy.parent == CACHE_DIR / "OB_Ingest" and
                     re.fullmatch(r"inspection_\d+\.pdf", inspection_copy.name)):
                 inspection_copy.unlink(missing_ok=True)
 
@@ -845,7 +848,7 @@ class NativeHostHandler:
             },
             "source": {
                 "created": save_source,
-                "path": str(source_md_path.relative_to(BASE_DIR)) if save_source else None,
+                "path": str(source_md_path.relative_to(VAULT_DIR)) if save_source else None,
                 "figures_found": len(figures),
                 "figures_requested": download_figures,
                 "figures_downloaded": len(downloaded_figs),
@@ -853,15 +856,15 @@ class NativeHostHandler:
             "pdf": {
                 "saved": saved_pdf,
                 "source": pdf_source,
-                "path": str(dest_pdf_path.relative_to(BASE_DIR)) if saved_pdf else None,
+                "path": str(dest_pdf_path.relative_to(VAULT_DIR)) if saved_pdf else None,
                 "size_bytes": dest_pdf_path.stat().st_size if (saved_pdf and dest_pdf_path.exists()) else 0,
                 "zotero_attached": bool(zotero_att_key),
             },
             "note": {
                 "created": note_created,
                 "updated": note_updated,
-                "path": str(note_md_path.relative_to(BASE_DIR)) if save_note else None,
-                "obsidian_uri": f"obsidian://open?vault=OB&file={urllib.parse.quote(str(note_md_path.relative_to(BASE_DIR)))}" if save_note else None,
+                "path": str(note_md_path.relative_to(VAULT_DIR)) if save_note else None,
+                "obsidian_uri": f"obsidian://open?vault={VAULT_NAME}&file={urllib.parse.quote(str(note_md_path.relative_to(VAULT_DIR)))}" if save_note else None,
             },
             "zotero": {
                 "key": zotero_key,
@@ -899,10 +902,10 @@ class NativeHostHandler:
                 return {"status": "error", "transfer_id": transfer_id, "completed": False, "message": "上傳的內容不是有效的 PDF 檔案 (%PDF 標頭缺失)"}
 
             if payload.get("inspection"):
-                dest_dir = SCRIPTS_DIR / ".cache" / "OB_Ingest"
+                dest_dir = CACHE_DIR / "OB_Ingest"
                 dest_path = dest_dir / f"inspection_{int(time.time() * 1000)}.pdf"
             else:
-                dest_dir = BASE_DIR / "Research" / topic / "sources" / "etc"
+                dest_dir = VAULT_DIR / "Research" / topic / "sources" / "etc"
                 dest_path = dest_dir / f"{stem}.pdf"
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_path.write_bytes(full_data)
@@ -915,7 +918,7 @@ class NativeHostHandler:
                 "status": "success",
                 "transfer_id": transfer_id,
                 "completed": True,
-                "path": str(dest_path.relative_to(BASE_DIR)),
+                "path": str(dest_path) if payload.get("inspection") else str(dest_path.relative_to(VAULT_DIR)),
                 "bytes": len(full_data),
             }
 
@@ -953,7 +956,7 @@ class NativeHostHandler:
             processed_content = raw_content
 
         # Determine file paths
-        topic_dir = BASE_DIR / "Research" / topic
+        topic_dir = VAULT_DIR / "Research" / topic
         notes_dir = topic_dir / "notes"
         notes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1035,8 +1038,8 @@ class NativeHostHandler:
         note_path.write_text(final_content, encoding="utf-8")
         logging.info(f"Saved reading note content to {note_path} ({len(final_content)} chars)")
 
-        rel_path = str(note_path.relative_to(BASE_DIR))
-        ob_uri = f"obsidian://open?vault=OB&file={urllib.parse.quote(rel_path)}"
+        rel_path = str(note_path.relative_to(VAULT_DIR))
+        ob_uri = f"obsidian://open?vault={VAULT_NAME}&file={urllib.parse.quote(rel_path)}"
 
         return {
             "status": "success",
@@ -1053,6 +1056,14 @@ class NativeHostHandler:
         logging.info(f"Handling action: {action}")
 
         try:
+            # These values are directory/file names, never paths supplied by a webpage.
+            fields = {"topic": payload.get("options", {}).get("topic", payload.get("topic"))}
+            if action in {"upload_pdf_chunk", "save_reading_note"}:
+                fields.update({key: payload.get(key) for key in ("stem", "citekey")})
+            for field, value in fields.items():
+                if value is not None and (not isinstance(value, str) or not value.strip()
+                        or value in {".", ".."} or any(char in value for char in ("/", "\\", "\x00"))):
+                    raise ValueError(f"Invalid {field}: expected a single directory or file name")
             if action == "ping":
                 return self.handle_ping(payload)
             elif action == "inspect_pdf":

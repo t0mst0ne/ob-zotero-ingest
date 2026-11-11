@@ -15,12 +15,13 @@ import requests
 
 from ingestion.identifier import normalize_doi, normalize_pmid, parse_frontmatter
 from ingestion.models import PaperMetadata
+from ingestion.runtime_config import RUNTIME_DIR, load_settings
 
 # Base paths
 BASE_DIR = Path(__file__).parent.parent.parent.resolve()
 SCRIPTS_DIR = BASE_DIR / "scripts"
-CONFIG_FILE = SCRIPTS_DIR / ".gemini_config.json"
-SKILL_FILE = Path("/Users/tomstone/.codex/skills/read-paper/SKILL.md")
+CONFIG_FILE = RUNTIME_DIR / "gemini.json"
+SKILL_FILE = Path(load_settings()["reading_prompt"]) if load_settings().get("reading_prompt") else None
 
 LATEST_MODELS = [
     "gemini-2.5-flash",
@@ -51,7 +52,7 @@ class GeminiClient:
                 pass
 
         # 2. Check .env in scripts/
-        env_file = SCRIPTS_DIR / ".env"
+        env_file = RUNTIME_DIR / ".env"
         if env_file.exists():
             try:
                 for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -70,6 +71,7 @@ class GeminiClient:
         """Save API key and preferred model to .gemini_config.json securely."""
         try:
             cfg = {"api_key": api_key.strip(), "model": model or self.model}
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
             os.chmod(CONFIG_FILE, 0o600)
             self.api_key = api_key.strip()
@@ -95,7 +97,7 @@ class GeminiClient:
 
     def _get_read_paper_system_instruction(self) -> str:
         """Load the comprehensive /read-paper prompt guidelines."""
-        if SKILL_FILE.exists():
+        if SKILL_FILE and SKILL_FILE.exists():
             try:
                 return SKILL_FILE.read_text(encoding="utf-8")
             except Exception:
