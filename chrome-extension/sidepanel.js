@@ -402,12 +402,16 @@ async function requestTabOriginPermission(url) {
 
 // Chrome omits tab.url / tab.title / tab.pendingUrl unless this extension has
 // activeTab for that tab, a host permission for the origin, or the "tabs"
-// permission. "tabs" is intentionally not requested: it would expose every
-// tab URL ("Read your browsing history") at install time. The toolbar click
-// grants activeTab; the「重新整理」button can ask for the optional host
-// permissions already declared in the manifest.
+// permission. "tabs" is not requested: it would expose every tab URL at
+// install time. The icon click grants activeTab and the service worker
+// remembers that one URL. A side-panel button cannot grant activeTab, so it
+// may request only an origin it already knows — never every website.
+const INTERNAL_PAGE_MESSAGE = "無法在瀏覽器系統頁面上擷取文獻。";
+const TAB_LOADING_MESSAGE = "正在讀取目前分頁…";
 const TAB_URL_UNAVAILABLE_HINT =
-  "無法讀取此分頁的網址，因此無法檢測文獻。請點「🔄 重新整理」並允許存取此網站；若這是瀏覽器內部頁面，請改開一般網頁。";
+  "無法讀取此分頁，因此無法檢測文獻。請再點一次擴充功能圖示，以授權目前這個分頁。若這是瀏覽器內部頁面，請改開一般網頁。";
+
+let detectGeneration = 0;
 
 function readTabUrl(tab) {
   if (!tab) return "";
@@ -425,42 +429,87 @@ function isInternalBrowserUrl(url) {
     url.startsWith("devtools://");
 }
 
-async function requestOptionalWebAccess() {
-  if (!chrome.permissions || typeof chrome.permissions.request !== "function") return false;
+function isInternalScriptError(error) {
+  const message = String(error && (error.message || error) || "");
+  return /chrome:\/\/|chrome-extension:\/\/|chrome-untrusted:\/\/|edge:\/\/|devtools:\/\/|about:|Cannot access a chrome|extensions gallery cannot be scripted|cannot be scripted/i.test(message);
+}
+
+function originPermissionHint(url) {
+  let host = "";
   try {
-    return Boolean(await chrome.permissions.request({
-      origins: ["https://*/*", "http://*/*"],
-    }));
+    host = new URL(url).host;
+  } catch (e) {}
+  if (!host) return TAB_URL_UNAVAILABLE_HINT;
+  return `尚未允許讀取 ${host}。請點「🔄 重新整理」以只授權這個網站。`;
+}
+
+async function readInvokedTab() {
+  if (!chrome.runtime || typeof chrome.runtime.sendMessage !== "function") return null;
+  try {
+    const response = await chrome.runtime.sendMessage({ action: "get_invoked_tab" });
+    if (!response || !response.tab) return null;
+    return response.tab;
   } catch (e) {
-    return false;
+    return null;
   }
 }
 
-async function resolveActiveTab(fromUserGesture) {
+// activeTab lets the extension inject without tabs.query revealing url.
+// The page's location.href is the current origin; a chrome:// page fails with
+// a distinct error, which is how the panel recognizes internal pages without
+// the "tabs" permission.
+async function readPageUrl(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    return { url: "", internal: false };
+  }
+  try {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => location.href,
+    });
+    const href = injected && injected[0] && injected[0].result;
+    if (typeof href === "string" && href) return { url: href, internal: isInternalBrowserUrl(href) };
+    return { url: "", internal: false };
+  } catch (error) {
+    return { url: "", internal: isInternalScriptError(error) };
+  }
+}
+
+async function resolveActiveTab() {
   const queried = await chrome.tabs.query({ active: true, currentWindow: true });
   let tab = queried && queried[0];
-  if (!tab || !tab.id) return { tab: null, url: "" };
+  if (!tab || !tab.id) return { tab: null, url: "", internal: false };
 
   let url = readTabUrl(tab);
-  // A side-panel button click is a user gesture for permissions.request, but
-  // it does not grant activeTab. Without a URL we cannot name this origin, so
-  // ask for the optional http(s) host permissions; after they are granted,
-  // tabs.query includes url for ordinary web pages.
-  if (!url && fromUserGesture) {
-    const granted = await requestOptionalWebAccess();
-    if (granted) {
-      const retried = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (retried && retried[0] && retried[0].id) tab = retried[0];
-      url = readTabUrl(tab);
+  let internal = Boolean(url) && isInternalBrowserUrl(url);
+
+  if (!url) {
+    const invoked = await readInvokedTab();
+    if (invoked && invoked.id === tab.id) url = readTabUrl(invoked);
+    if (url && isInternalBrowserUrl(url)) internal = true;
+  }
+
+  // Prefer the live page over a URL captured at the last icon click.
+  if (!url || !internal) {
+    const probed = !url ? await readPageUrl(tab.id) : null;
+    if (probed && probed.internal) {
+      internal = true;
+      url = probed.url || url;
+    } else if (probed && probed.url) {
+      url = probed.url;
+      internal = isInternalBrowserUrl(url);
     }
   }
+
   if (url && tab.url !== url) {
     tab = Object.assign({}, tab, { url: url });
   }
-  return { tab: tab, url: url };
+  return { tab: tab, url: url, internal: internal };
 }
 
 async function detectActiveTab(fromUserGesture = false) {
+  const generation = ++detectGeneration;
+  const stillCurrent = () => generation === detectGeneration;
   if (!nativePort) {
     connectToNativeHost();
   }
@@ -468,7 +517,8 @@ async function detectActiveTab(fromUserGesture = false) {
   btnDetect.disabled = true;
 
   try {
-    const resolved = await resolveActiveTab(fromUserGesture);
+    const resolved = await resolveActiveTab();
+    if (!stillCurrent()) return;
     const tab = resolved.tab;
     const url = resolved.url;
     if (!tab || !tab.id) {
@@ -476,13 +526,13 @@ async function detectActiveTab(fromUserGesture = false) {
       return;
     }
 
-    if (!url) {
-      showEmpty(TAB_URL_UNAVAILABLE_HINT);
+    if (resolved.internal || (url && isInternalBrowserUrl(url))) {
+      showEmpty(INTERNAL_PAGE_MESSAGE);
       return;
     }
 
-    if (isInternalBrowserUrl(url)) {
-      showEmpty("無法在瀏覽器系統頁面上擷取文獻。");
+    if (!url) {
+      showEmpty(TAB_URL_UNAVAILABLE_HINT);
       return;
     }
 
@@ -500,17 +550,24 @@ async function detectActiveTab(fromUserGesture = false) {
         files: ["content_script.js"],
       });
     } catch (scriptErr) {
+      if (!stillCurrent()) return;
+      if (isInternalScriptError(scriptErr)) {
+        showEmpty(INTERNAL_PAGE_MESSAGE);
+        return;
+      }
+      // Only the origin we already resolved. Never a wildcard host pattern.
       if (fromUserGesture && await requestTabOriginPermission(url)) {
         results = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           files: ["content_script.js"],
         });
       } else {
-        showEmpty(TAB_URL_UNAVAILABLE_HINT);
+        showEmpty(originPermissionHint(url));
         return;
       }
     }
 
+    if (!stillCurrent()) return;
     if (results && results[0] && results[0].result) {
       const data = results[0].result;
       currentArticleData = data;
@@ -529,11 +586,65 @@ async function detectActiveTab(fromUserGesture = false) {
     }
   } catch (err) {
     console.error("Detection error:", err);
-    showEmpty(`檢測出錯: ${err.message}`);
+    if (stillCurrent()) showEmpty(`檢測出錯: ${err.message}`);
   } finally {
+    if (stillCurrent()) {
+      btnDetect.textContent = "🔄 重新整理";
+      btnDetect.disabled = false;
+    }
+  }
+}
+
+function handleTabActivated() {
+  showEmpty(TAB_LOADING_MESSAGE);
+  return detectActiveTab(false);
+}
+
+async function handleTabUpdated(tabId, changeInfo) {
+  if (!changeInfo || !chrome.tabs || typeof chrome.tabs.query !== "function") return;
+  const started = changeInfo.status === "loading";
+  const finished = changeInfo.status === "complete" || typeof changeInfo.url === "string";
+  if (!started && !finished) return;
+  let activeId = null;
+  try {
+    const queried = await chrome.tabs.query({ active: true, currentWindow: true });
+    activeId = queried && queried[0] && queried[0].id;
+  } catch (e) {
+    return;
+  }
+  if (activeId !== tabId) return;
+  if (started && !finished) {
+    detectGeneration += 1;
+    showEmpty(TAB_LOADING_MESSAGE);
     btnDetect.textContent = "🔄 重新整理";
     btnDetect.disabled = false;
+    return;
   }
+  return detectActiveTab(false);
+}
+
+function registerTabWatchers() {
+  if (!chrome.tabs || registerTabWatchers.done) return;
+  registerTabWatchers.done = true;
+  if (chrome.tabs.onActivated && typeof chrome.tabs.onActivated.addListener === "function") {
+    chrome.tabs.onActivated.addListener(() => {
+      handleTabActivated();
+    });
+  }
+  if (chrome.tabs.onUpdated && typeof chrome.tabs.onUpdated.addListener === "function") {
+    chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+      handleTabUpdated(tabId, changeInfo);
+    });
+  }
+}
+
+function registerRuntimeMessages() {
+  if (!chrome.runtime || !chrome.runtime.onMessage || typeof chrome.runtime.onMessage.addListener !== "function" || registerRuntimeMessages.done) return;
+  registerRuntimeMessages.done = true;
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.action !== "invoked_tab" || !message.tab) return;
+    detectActiveTab(false);
+  });
 }
 
 function isPdfTabUrl(url) {
@@ -678,6 +789,7 @@ function renderArticle(data) {
 }
 
 function showEmpty(message) {
+  currentArticleData = null;
   articleEmpty.classList.remove("hidden");
   articleEmpty.querySelector("p").textContent = message;
   articleContent.classList.add("hidden");
@@ -1754,3 +1866,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     btnSaveNote.disabled = pasteContent.value.trim().length === 0;
   });
 });
+
+registerTabWatchers();
+registerRuntimeMessages();

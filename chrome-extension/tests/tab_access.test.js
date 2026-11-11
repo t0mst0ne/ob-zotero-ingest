@@ -21,7 +21,12 @@ function loadSidePanel(chrome, logs = { warnings: [], errors: [] }) {
         disabled: false,
         className: '',
         href: '',
-        classList: { add() {}, remove() {} },
+        classList: {
+          hidden: false,
+          add(name) { if (name === "hidden") this.hidden = true; },
+          remove(name) { if (name === "hidden") this.hidden = false; },
+          contains(name) { return name === "hidden" && this.hidden; },
+        },
         addEventListener() {},
         querySelector() { return message; },
       });
@@ -82,13 +87,12 @@ test('readTabUrl does not touch a missing url', () => {
 });
 
 test('detectActiveTab shows a Traditional Chinese hint when tab.url is omitted', async () => {
-  let executeCalled = false;
-  let permissionRequested = false;
+  const requested = [];
   const logs = { warnings: [], errors: [] };
   const { context, element } = loadSidePanel({
     tabs: { query: async () => [{ id: 7 }] },
-    scripting: { executeScript: async () => { executeCalled = true; return []; } },
-    permissions: { request: async () => { permissionRequested = true; return true; } },
+    scripting: { executeScript: async () => { throw new Error('Cannot access contents of the page'); } },
+    permissions: { request: async (options) => { requested.push(options.origins); return true; } },
   }, logs);
 
   await vm.runInContext('detectActiveTab(false)', context);
@@ -96,38 +100,38 @@ test('detectActiveTab shows a Traditional Chinese hint when tab.url is omitted',
   const hint = emptyMessage(element);
   assert.equal(hint, vm.runInContext('TAB_URL_UNAVAILABLE_HINT', context));
   assert.match(hint, /檢測/);
-  assert.match(hint, /重新整理/);
-  assert.match(hint, /允許存取此網站/);
-  assert.equal(executeCalled, false);
-  assert.equal(permissionRequested, false);
+  assert.match(hint, /擴充功能圖示/);
+  assert.equal(hint.includes('所有網站'), false);
+  assert.equal(requested.length, 0);
   assert.equal(element('btn-detect').disabled, false);
   assert.equal(element('btn-detect').textContent, '🔄 重新整理');
   assert.equal(element('status-note').textContent, '未核對');
   assert.equal(logs.errors.some((line) => line.includes('Detection error') || line.includes('startsWith')), false);
 });
 
-test('refresh click asks for optional host access and detects once the url is available', async () => {
-  const queriedTabs = [
-    [{ id: 7 }],
-    [{ id: 7, url: 'https://example.com/' }],
-  ];
-  let queryCount = 0;
-  let executeCalled = false;
+test('refresh uses the icon-click origin and never asks for every website', async () => {
   const requested = [];
+  const injected = [];
   const logs = { warnings: [], errors: [] };
   const { context, element } = loadSidePanel({
-    tabs: {
-      query: async () => queriedTabs[Math.min(queryCount++, queriedTabs.length - 1)],
+    tabs: { query: async () => [{ id: 7 }] },
+    runtime: {
+      sendMessage: async (message) => {
+        if (message.action === 'get_invoked_tab') {
+          return { tab: { id: 7, url: 'https://example.com/docs' } };
+        }
+        return null;
+      },
     },
     scripting: {
-      executeScript: async () => {
-        executeCalled = true;
+      executeScript: async (options) => {
+        injected.push(options.files ? 'files' : 'func');
         return [articleResult()];
       },
     },
     permissions: {
       request: async (options) => {
-        requested.push(options.origins);
+        requested.push([].concat(options.origins));
         return true;
       },
     },
@@ -135,41 +139,63 @@ test('refresh click asks for optional host access and detects once the url is av
 
   await vm.runInContext('detectActiveTab(true)', context);
 
-  assert.deepEqual(requested.map((origins) => [...origins]), [['https://*/*', 'http://*/*']]);
-  assert.equal(executeCalled, true);
+  assert.deepEqual(requested, []);
+  assert.deepEqual(injected, ['files']);
   assert.equal(element('art-title').textContent, 'Example Domain');
-  assert.equal(emptyMessage(element).includes('無法讀取此分頁的網址'), false);
   assert.equal(logs.errors.some((line) => line.includes('Detection error')), false);
 });
 
-test('denied optional host access keeps the hint and does not throw', async () => {
-  let executeCalled = false;
+test('a live location.href is used when the icon click did not capture a url', async () => {
+  const requested = [];
+  const { context, element } = loadSidePanel({
+    tabs: { query: async () => [{ id: 7 }] },
+    runtime: { sendMessage: async () => ({ tab: null }) },
+    scripting: {
+      executeScript: async (options) => {
+        if (options.func) return [{ result: 'https://example.com/article' }];
+        return [articleResult()];
+      },
+    },
+    permissions: { request: async (options) => { requested.push(options.origins); return true; } },
+  });
+
+  await vm.runInContext('detectActiveTab(true)', context);
+
+  assert.equal(requested.length, 0);
+  assert.equal(element('art-title').textContent, 'Example Domain');
+});
+
+test('a side-panel click does not request every website when the origin is unknown', async () => {
+  const requested = [];
   const logs = { warnings: [], errors: [] };
   const { context, element } = loadSidePanel({
     tabs: { query: async () => [{ id: 7 }] },
-    scripting: { executeScript: async () => { executeCalled = true; return []; } },
-    permissions: { request: async () => false },
+    scripting: { executeScript: async () => { throw new Error('Cannot access contents of the page'); } },
+    permissions: { request: async (options) => { requested.push(options.origins); return true; } },
   }, logs);
 
   await vm.runInContext('detectActiveTab(true)', context);
 
   assert.equal(emptyMessage(element), vm.runInContext('TAB_URL_UNAVAILABLE_HINT', context));
-  assert.equal(executeCalled, false);
+  assert.deepEqual(requested, []);
   assert.equal(logs.errors.length, 0);
 });
 
-test('a thrown permission prompt still degrades to the hint', async () => {
-  const logs = { warnings: [], errors: [] };
+test('an invoked url for another tab is not reused after a switch', async () => {
+  const requested = [];
   const { context, element } = loadSidePanel({
-    tabs: { query: async () => [{ id: 7, title: 'Example Domain' }] },
-    scripting: { executeScript: async () => { throw new Error('should not inject'); } },
-    permissions: { request: async () => { throw new Error('gesture consumed'); } },
-  }, logs);
+    tabs: { query: async () => [{ id: 8 }] },
+    runtime: {
+      sendMessage: async () => ({ tab: { id: 7, url: 'https://example.com/' } }),
+    },
+    scripting: { executeScript: async () => { throw new Error('Cannot access contents of the page'); } },
+    permissions: { request: async (options) => { requested.push(options.origins); return true; } },
+  });
 
   await vm.runInContext('detectActiveTab(true)', context);
 
   assert.equal(emptyMessage(element), vm.runInContext('TAB_URL_UNAVAILABLE_HINT', context));
-  assert.equal(logs.errors.some((line) => line.includes('startsWith') || line.includes('Detection error')), false);
+  assert.deepEqual(requested, []);
 });
 
 test('pendingUrl is enough to detect without requesting every site', async () => {
@@ -222,6 +248,71 @@ test('a known site url requests only that origin after injection is denied', asy
   assert.equal(logs.errors.some((line) => line.includes('Detection error')), false);
 });
 
+test('switching tabs clears the previous article and recognizes a chrome page', async () => {
+  let tab = { id: 7, url: 'https://example.com/' };
+  const requested = [];
+  let activated = null;
+  const { context, element } = loadSidePanel({
+    tabs: {
+      query: async () => [tab],
+      onActivated: { addListener(fn) { activated = fn; } },
+      onUpdated: { addListener() {} },
+    },
+    scripting: {
+      executeScript: async () => {
+        if (!tab.url || String(tab.url).startsWith('chrome')) {
+          throw new Error('Cannot access a chrome:// URL');
+        }
+        return [articleResult()];
+      },
+    },
+    permissions: { request: async (options) => { requested.push(options.origins); return true; } },
+  });
+
+  await vm.runInContext('detectActiveTab(false)', context);
+  assert.equal(element('art-title').textContent, 'Example Domain');
+  assert.equal(element('article-content').classList.contains('hidden'), false);
+  assert.equal(typeof activated, 'function');
+
+  tab = { id: 8 };
+  await vm.runInContext('handleTabActivated()', context);
+
+  assert.equal(emptyMessage(element), '無法在瀏覽器系統頁面上擷取文獻。');
+  assert.equal(element('article-content').classList.contains('hidden'), true);
+  assert.deepEqual(requested, []);
+});
+
+test('navigation of another tab does not clear the open article', async () => {
+  let tab = { id: 7, url: 'https://example.com/' };
+  const { context, element } = loadSidePanel({
+    tabs: {
+      query: async () => [tab],
+      onActivated: { addListener() {} },
+      onUpdated: { addListener() {} },
+    },
+    scripting: {
+      executeScript: async () => {
+        if (!tab.url) throw new Error('Cannot access a chrome:// URL');
+        return [articleResult()];
+      },
+    },
+    permissions: { request: async () => true },
+  });
+
+  await vm.runInContext('detectActiveTab(false)', context);
+  await vm.runInContext('handleTabUpdated(99, { status: "complete" })', context);
+  assert.equal(element('art-title').textContent, 'Example Domain');
+  assert.equal(element('article-content').classList.contains('hidden'), false);
+
+  await vm.runInContext('handleTabUpdated(7, { status: "loading" })', context);
+  assert.equal(emptyMessage(element), vm.runInContext('TAB_LOADING_MESSAGE', context));
+  assert.equal(element('article-content').classList.contains('hidden'), true);
+
+  tab = { id: 7 };
+  await vm.runInContext('handleTabUpdated(7, { status: "complete" })', context);
+  assert.equal(emptyMessage(element), '無法在瀏覽器系統頁面上擷取文獻。');
+});
+
 test('internal browser pages do not crash and do not prompt for host access', async () => {
   let requested = false;
   const { context, element } = loadSidePanel({
@@ -269,20 +360,27 @@ test('missing native host disconnect stays quiet; a live session drop still warn
   );
 });
 
-test('toolbar click opens the side panel and the manifest does not request tabs', () => {
+test('toolbar click remembers only that tab and drops the url when it navigates', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(extensionDir, 'manifest.json'), 'utf8'));
   assert.equal(manifest.permissions.includes('tabs'), false);
   assert.equal(manifest.permissions.includes('activeTab'), true);
   assert.deepEqual(manifest.optional_host_permissions, ['https://*/*', 'http://*/*']);
   assert.equal(manifest.minimum_chrome_version, '116');
   assert.equal(backgroundScript.includes('setPanelBehavior'), false);
+  assert.equal(sidepanelScript.includes('https://*/*'), false);
+  assert.equal(sidepanelScript.includes('http://*/*'), false);
 
   let listener = null;
+  let onMessage = null;
+  let onUpdated = null;
   const opened = [];
   const context = vm.createContext({
     chrome: {
       action: { onClicked: { addListener(fn) { listener = fn; } } },
-      runtime: { onMessage: { addListener() {} } },
+      runtime: {
+        onMessage: { addListener(fn) { onMessage = fn; } },
+        sendMessage() { return Promise.resolve(); },
+      },
       sidePanel: {
         open(options) {
           opened.push(options);
@@ -292,12 +390,55 @@ test('toolbar click opens the side panel and the manifest does not request tabs'
           throw new Error('openPanelOnActionClick must not be used');
         },
       },
+      tabs: { onUpdated: { addListener(fn) { onUpdated = fn; } } },
     },
     console,
   });
   vm.runInContext(backgroundScript, context);
   assert.equal(typeof listener, 'function');
-  listener({ id: 3, windowId: 9 });
+  listener({ id: 3, windowId: 9, url: 'https://example.com/' });
   assert.equal(opened.length, 1);
   assert.equal(opened[0].windowId, 9);
+
+  let response = null;
+  onMessage({ action: 'get_invoked_tab' }, {}, (value) => { response = value; });
+  assert.equal(response.tab.id, 3);
+  assert.equal(response.tab.url, 'https://example.com/');
+
+  onUpdated(3, { status: 'loading' });
+  onMessage({ action: 'get_invoked_tab' }, {}, (value) => { response = value; });
+  assert.equal(response.tab.url, '');
+
+  listener({ id: 4, windowId: 9, url: 'https://www.wikipedia.org/' });
+  onUpdated(3, { status: 'loading' });
+  onMessage({ action: 'get_invoked_tab' }, {}, (value) => { response = value; });
+  assert.equal(response.tab.id, 4);
+  assert.equal(response.tab.url, 'https://www.wikipedia.org/');
+});
+
+test('icon click reads location.href when the action tab omits url', async () => {
+  let listener = null;
+  let onMessage = null;
+  const context = vm.createContext({
+    chrome: {
+      action: { onClicked: { addListener(fn) { listener = fn; } } },
+      runtime: {
+        onMessage: { addListener(fn) { onMessage = fn; } },
+        sendMessage() { return Promise.resolve(); },
+      },
+      sidePanel: { open() { return Promise.resolve(); } },
+      tabs: { onUpdated: { addListener() {} } },
+      scripting: {
+        executeScript: async () => [{ result: 'https://example.com/' }],
+      },
+    },
+    console,
+  });
+  vm.runInContext(backgroundScript, context);
+  listener({ id: 5, windowId: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let response = null;
+  onMessage({ action: 'get_invoked_tab' }, {}, (value) => { response = value; });
+  assert.equal(response.tab.id, 5);
+  assert.equal(response.tab.url, 'https://example.com/');
 });
