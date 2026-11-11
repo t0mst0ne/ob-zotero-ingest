@@ -22,7 +22,7 @@ mkdir -p "$HOME/GITHUB/OB-Zotero-Demo-Vault"
 
 如果 Chrome 已經註冊原 OB 的 Native Host，安裝器會停止，避免覆蓋。確定要切換到此專案時才加上 `--replace-host`；要保留原設定，使用下方隔離測試即可。
 
-載入擴充功能後，開啟側欄，確認「本地庫已連線」。`manifest.json` 的公鑰讓開發版 ID 固定；若 Chrome 顯示的 ID 不同，或改用商店版本，重新安裝時加上 `--extension-id 實際ID`。不要刪除或搬動已註冊的專案／`.venv`；搬動後需重新執行安裝。
+載入擴充功能後，開啟側欄，確認「本地庫已連線」。`manifest.json` 的公鑰讓開發版 ID 固定為 `nigcccipceneamlocmomenlncpedpkne`。商店 zip 會拿掉這把公鑰，所以上架後的項目 ID 不同。改用商店版本時，請用商店項目 ID 重新註冊 Host：`./install.sh --vault <vault 路徑> --extension-id <商店項目 ID>`。不要刪除或搬動已註冊的專案／`.venv`；搬動後需重新執行安裝。
 
 ## 空白環境測試
 
@@ -75,4 +75,4 @@ Gemini 為選用功能；沒有憑證也能啟動。設定位置是專案的執�
 
 - **最小權限與無 Cookie 外傳**：移除 `cookies` 權限與 `document.cookie` 擷取，將安裝期 `<all_urls>` 改為 `activeTab` 搭配按需請求之 `optional_host_permissions`。
 - **免安裝 Python 瀏覽器直連模式（File System Access API）**：未安裝本地 Python Host 時，可直接點選側欄的「📂 選擇 Vault 資料夾」，授權本地 Obsidian Vault 目錄後，即可在瀏覽器內直接執行「🚀 一鍵入庫至本地庫」（寫入 `Research/<主題>/sources/`、下載高解析度圖表至 `_assets/`、下載原廠或 Open Access PDF 至 `sources/etc/`）與「💾 寫入 Obsidian 筆記」（支援自動保留 YAML frontmatter），亦可一鍵「📋 複製結構化全文 Markdown」。
-- **隱私權政策與送審指南**：完整中英雙語隱私權政策見 [PRIVACY.md](PRIVACY.md)；Chrome Web Store 欄位填寫說明、權限理由與審查員測試指引見 [CHROME_WEB_STORE.md](CHROME_WEB_STORE.md)。
+- **隱私權政策與送審指南**：隱私權政策公開於 https://t0mst0ne.github.io/ob-zotero-ingest/privacy/ （與 [PRIVACY.md](PRIVACY.md) 相同；GitHub Pages 需在 Settings → Pages 選擇 Deploy from a branch：`main` / `docs` 後才會上線）。Chrome Web Store 欄位、權限理由與資料揭露見 [CHROME_WEB_STORE.md](CHROME_WEB_STORE.md)。

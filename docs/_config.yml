@@ -1,0 +1,11 @@
+title: OB–Zotero Academic Ingestion
+description: >-
+  Privacy policy for the OB–Zotero Academic Ingestion Chrome extension.
+theme: minima
+url: "https://t0mst0ne.github.io"
+baseurl: "/ob-zotero-ingest"
+lang: zh-TW
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
