@@ -10,11 +10,11 @@
     "activeTab",
     "scripting",
     "clipboardRead",
-    "cookies",
     "downloads"
   ],
-  "host_permissions": [
-    "<all_urls>"
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background.js"

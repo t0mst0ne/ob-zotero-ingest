@@ -10,11 +10,13 @@ const NATIVE_HOST_NAME = "com.ob.zotero.ingest";
 let nativePort = null;
 let currentArticleData = null;
 let isIngesting = false;
+let currentVaultName = "OB";
 
 // DOM Elements
 const hostBadge = document.getElementById("host-badge");
 const btnDetect = document.getElementById("btn-detect");
 const btnIngest = document.getElementById("btn-ingest");
+const btnCopyMd = document.getElementById("btn-copy-md");
 
 const articleEmpty = document.getElementById("article-empty");
 const articleContent = document.getElementById("article-content");
@@ -103,8 +105,8 @@ function sendNativeMessage(action, payload) {
         if (nativePort) nativePort.postMessage({ action, payload });
       }, 150);
     }
-  } else {
-    showError("無法連線至本地 Native Messaging Host，請先依 README 執行 ./install.sh 並設定 Vault。");
+  } else if (action !== "check_status" && action !== "ping") {
+    showError("無法連線至本地 Native Messaging Host，請先依 README 執行 ./install.sh 並設定 Vault（或使用上方「複製結構化全文 Markdown」）。");
   }
 }
 
@@ -133,13 +135,17 @@ function handleNativeResponse(msg) {
   }
   if (msg.status === "ok" && msg.version) {
     // Ping response
+    if (msg.vault_name) currentVaultName = msg.vault_name;
     hostBadge.textContent = `● 本地庫已連線 (Zotero: ${msg.zotero_indexed_dois} 篇)`;
     hostBadge.className = "badge badge-connected";
   } else if (msg.status === "ok" && msg.obsidian && msg.zotero) {
     // Check status response
-    if (currentArticleData && msg.doi && msg.doi === currentArticleData.metadata.doi && msg.pmid) {
-      currentArticleData.metadata.pmid = msg.pmid;
-      artPmid.textContent = `PMID: ${msg.pmid}`;
+    if (currentArticleData && currentArticleData.metadata && msg.pmid) {
+      const currentDoi = (currentArticleData.metadata.doi || "").toLowerCase();
+      if (!currentDoi || !msg.doi || msg.doi.toLowerCase() === currentDoi || currentDoi.includes(msg.doi.toLowerCase())) {
+        currentArticleData.metadata.pmid = msg.pmid;
+        artPmid.textContent = `PMID: ${msg.pmid}`;
+      }
     }
     updateStatusMatrix(msg);
   } else if (msg.status === "success" && msg.target_type) {
@@ -156,7 +162,18 @@ function handleNativeResponse(msg) {
 
 // ── Active Tab Extraction ───────────────────────────────────────────────────
 
-async function detectActiveTab() {
+async function requestTabOriginPermission(url) {
+  if (!url || !chrome.permissions || !chrome.permissions.request) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    return await chrome.permissions.request({ origins: [`${parsed.origin}/*`] });
+  } catch (e) {
+    return false;
+  }
+}
+
+async function detectActiveTab(fromUserGesture = false) {
   if (!nativePort) {
     connectToNativeHost();
   }
@@ -181,11 +198,23 @@ async function detectActiveTab() {
       return;
     }
 
-    // Execute content script in active tab
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content_script.js"],
-    });
+    // Execute content script in active tab (request origin permission on user gesture if needed)
+    let results;
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["content_script.js"],
+      });
+    } catch (scriptErr) {
+      if (fromUserGesture && await requestTabOriginPermission(tab.url)) {
+        results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ["content_script.js"],
+        });
+      } else {
+        throw scriptErr;
+      }
+    }
 
     if (results && results[0] && results[0].result) {
       const data = results[0].result;
@@ -350,6 +379,7 @@ function renderArticle(data) {
   artPmid.textContent = meta.pmid ? `PMID: ${meta.pmid}` : "PMID: 無";
 
   btnIngest.disabled = false;
+  if (btnCopyMd) btnCopyMd.disabled = false;
 }
 
 function showEmpty(message) {
@@ -357,6 +387,7 @@ function showEmpty(message) {
   articleEmpty.querySelector("p").textContent = message;
   articleContent.classList.add("hidden");
   btnIngest.disabled = true;
+  if (btnCopyMd) btnCopyMd.disabled = true;
 
   statusNote.textContent = "未核對";
   statusNote.className = "matrix-val val-unknown";
@@ -462,7 +493,7 @@ function extractLeadAuthor(authorsStr) {
     }
   }
   let clean = surname.replace(/[^a-zA-Z0-9]/g, "");
-  if (clean && clean.length > 0) {
+  if (clean && clean === clean.toLowerCase()) {
     clean = clean.charAt(0).toUpperCase() + clean.slice(1);
   }
   return clean || "Unknown";
@@ -476,7 +507,7 @@ function computeStem(metadata) {
   const articleName = cleanArticleTitle(metadata.title);
 
   if (pmid) return `${pmid}_${author}_${articleName}_${year}`;
-  if (doi) return `${doi.replace(/\//g, "_")}_${author}_${articleName}_${year}`;
+  if (doi) return `${doi.replace(/[^\w.\-]+/g, "_")}_${author}_${articleName}_${year}`;
   return `${author}_${articleName}_${year}`;
 }
 
@@ -673,20 +704,6 @@ async function startIngestion() {
   const shouldDownloadPdf = optPdf ? optPdf.checked : true;
   const stem = computeStem(currentArticleData.metadata);
 
-  // Retrieve origin cookies for python/curl fallback if needed
-  let cookieString = currentArticleData.cookies || "";
-  if (pdfUrl) {
-    try {
-      const parsedUrl = new URL(pdfUrl);
-      const cookiesList = await chrome.cookies.getAll({ domain: parsedUrl.hostname });
-      if (cookiesList && cookiesList.length > 0) {
-        cookieString = cookiesList.map(c => `${c.name}=${c.value}`).join("; ");
-      }
-    } catch (e) {
-      console.warn("Could not retrieve domain cookies:", e);
-    }
-  }
-
   // In-browser PDF capture if PDF URL is available
   let dlResult = shouldDownloadPdf && currentArticleData.downloaded_file_path
     ? { ok: true, downloadedFilePath: currentArticleData.downloaded_file_path }
@@ -712,7 +729,6 @@ async function startIngestion() {
     sections: currentArticleData.sections,
     figures: currentArticleData.figures,
     tables: currentArticleData.tables,
-    cookies: cookieString,
     pdf_url: pdfUrl,
     stem: stem,
     uploaded_pdf_stem: dlResult && dlResult.uploadedStem ? dlResult.uploadedStem : null,
@@ -736,6 +752,15 @@ function handleIngestionSuccess(res) {
   btnIngest.disabled = false;
   progressSpinner.classList.add("hidden");
   resultSuccess.classList.remove("hidden");
+
+  if (currentArticleData) {
+    if (res.metadata) {
+      currentArticleData.metadata = Object.assign({}, currentArticleData.metadata, res.metadata);
+    }
+    if (res.stem) {
+      currentArticleData.ingested_stem = res.stem;
+    }
+  }
 
   const desc = [];
   if (res.source && res.source.created) {
@@ -771,8 +796,8 @@ function handleIngestionSuccess(res) {
     linkObNote.classList.add("hidden");
   }
 
-  if (res.pdf && res.pdf.saved && res.pdf.path) {
-    linkObPdf.href = `obsidian://open?vault=OB&file=${encodeURIComponent(res.pdf.path)}`;
+  if (res.pdf && res.pdf.saved && (res.pdf.obsidian_uri || res.pdf.path)) {
+    linkObPdf.href = res.pdf.obsidian_uri || `obsidian://open?vault=${encodeURIComponent(currentVaultName)}&file=${encodeURIComponent(res.pdf.path)}`;
     linkObPdf.classList.remove("hidden");
   } else {
     linkObPdf.classList.add("hidden");
@@ -858,6 +883,81 @@ async function pasteFromClipboard() {
   }
 }
 
+function buildStructuredMarkdown(articleData, topic) {
+  const meta = (articleData && articleData.metadata) || {};
+  const sections = (articleData && articleData.sections) || [];
+  const figures = (articleData && articleData.figures) || [];
+  const tables = (articleData && articleData.tables) || [];
+  const quoteYaml = (val) => `"${String(val || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\r\n]+/g, " ").trim()}"`;
+
+  const lines = ["---"];
+  lines.push(`title: ${quoteYaml(meta.title || "Untitled Article")}`);
+  if (meta.authors) lines.push(`authors: ${quoteYaml(meta.authors)}`);
+  if (meta.journal) lines.push(`journal: ${quoteYaml(meta.journal)}`);
+  if (meta.year) lines.push(`year: ${meta.year}`);
+  if (meta.doi) lines.push(`doi: ${meta.doi}`);
+  if (meta.pmid) lines.push(`pmid: ${meta.pmid}`);
+  if (meta.url) lines.push(`url: ${meta.url}`);
+  lines.push(`captured_date: ${new Date().toISOString().slice(0, 10)}`);
+  lines.push("type: source-snapshot");
+  lines.push(`tags: [source, ${(topic || "neurology").toLowerCase()}, full-text]`);
+  lines.push("---", "", `# ${meta.title || "Untitled Article"}`, "");
+
+  if (meta.abstract) {
+    lines.push("## Abstract", meta.abstract, "");
+  }
+  for (const sec of sections) {
+    const heading = (sec.heading || "").trim();
+    const level = sec.level || 2;
+    const text = (sec.text || "").trim();
+    if (heading) lines.push(`${"#".repeat(level)} ${heading}`);
+    if (text) lines.push(text, "");
+  }
+  if (figures.length > 0) {
+    lines.push("## Figures & Captions");
+    for (let i = 0; i < figures.length; i++) {
+      const fig = figures[i];
+      const label = fig.label || `Figure_${i + 1}`;
+      lines.push(`### ${label}`);
+      if (fig.src) lines.push(`![${label}](${fig.src})`);
+      if (fig.caption) lines.push(`> 📌 **${label}**: ${fig.caption}`);
+      lines.push("");
+    }
+  }
+  if (tables.length > 0) {
+    lines.push("## Tables");
+    for (const tbl of tables) {
+      lines.push(`### ${tbl.caption || "Table"}`);
+      if (tbl.markdown) lines.push(tbl.markdown.trim());
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+
+async function copyStructuredMarkdown() {
+  if (!currentArticleData) return;
+  const topic = topicSelect ? topicSelect.value : "Neurology";
+  const md = buildStructuredMarkdown(currentArticleData, topic);
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(md);
+    } else if (pasteContent) {
+      pasteContent.value = md;
+    }
+    if (btnCopyMd) {
+      const orig = btnCopyMd.textContent;
+      btnCopyMd.textContent = "✅ 已複製全文 Markdown 至剪貼簿！";
+      setTimeout(() => { btnCopyMd.textContent = orig; }, 2200);
+    }
+  } catch (e) {
+    if (pasteContent) {
+      pasteContent.value = md;
+      btnSaveNote.disabled = false;
+    }
+  }
+}
+
 function saveReadingNote() {
   const content = pasteContent.value.trim();
   if (!content) {
@@ -870,7 +970,9 @@ function saveReadingNote() {
 
   const targetRadio = document.querySelector('input[name="import-target"]:checked');
   const targetType = targetRadio ? targetRadio.value : "note";
-  const stem = currentArticleData && currentArticleData.metadata ? computeStem(currentArticleData.metadata) : null;
+  const stem = currentArticleData
+    ? (currentArticleData.ingested_stem || (currentArticleData.metadata ? computeStem(currentArticleData.metadata) : null))
+    : null;
 
   const payload = {
     topic: topicSelect ? topicSelect.value : "Neurology",
@@ -940,12 +1042,18 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnDetect.addEventListener("click", () => {
-    detectActiveTab();
+    detectActiveTab(true);
   });
 
   btnIngest.addEventListener("click", () => {
     startIngestion();
   });
+
+  if (btnCopyMd) {
+    btnCopyMd.addEventListener("click", () => {
+      copyStructuredMarkdown();
+    });
+  }
 
   // Clipboard & Note Import Events
   btnPasteClip.addEventListener("click", () => {

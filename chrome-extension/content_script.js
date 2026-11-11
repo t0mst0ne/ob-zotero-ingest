@@ -342,14 +342,16 @@
 
   function extractTables() {
     const tables = [];
+    const seenTables = new Set();
     const tableWraps = document.querySelectorAll(".table-wrap, .c-article-table, figure.table, table");
 
     tableWraps.forEach((wrapEl, idx) => {
       const table = wrapEl.tagName === "TABLE" ? wrapEl : wrapEl.querySelector("table");
-      if (!table) return;
+      if (!table || seenTables.has(table)) return;
+      seenTables.add(table);
 
       const captionEl = wrapEl.querySelector("caption, .table-title, figcaption, .caption");
-      const caption = cleanText(captionEl ? captionEl.textContent : `Table ${idx + 1}`);
+      const caption = cleanText(captionEl ? captionEl.textContent : `Table ${tables.length + 1}`);
 
       const mdTable = tableToMarkdown(table);
       if (mdTable && mdTable.length > 20) {
@@ -369,7 +371,6 @@
     sections: extractSections(),
     figures: extractFigures(),
     tables: extractTables(),
-    cookies: document.cookie,
   };
 
   return data;

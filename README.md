@@ -65,12 +65,14 @@ Zotero 預設不讀取任何本地資料庫。需要整合時，明確傳入 `--
 
 Gemini 為選用功能；沒有憑證也能啟動。設定位置是專案的執行期目錄中的 `gemini.json`，不再搜尋原 OB 或使用者私人的 skill。掃描 PDF 的 OCR 使用 macOS Swift Vision，需系統能執行 `swift`；此次 clean install 測試不涵蓋 OCR。
 
-## 打包
+## 打包與 Chrome Web Store 送審準備
 
 ```sh
-.venv/bin/python scripts/package_extension.py
+.venv/bin/python -I scripts/package_extension.py
 ```
 
-輸出 `dist/ob-zotero-1.0.0.zip`。ZIP 僅包含瀏覽器端必要檔案，不包含本地 Host、測試、憑證或 `.venv`。商店擴充功能安裝後仍需要另外安裝本地 Host。
+輸出 `dist/ob-zotero-1.0.0.zip`。ZIP 僅包含瀏覽器端必要檔案，不包含本地 Host、測試、憑證或 `.venv`，且自動移除開發用 `"key"` 欄位以符合 Chrome Web Store 新上架規範（本地 `chrome-extension/manifest.json` 仍保留 `"key"` 供開發模式固定 ID 使用；若需保留可加 `--keep-key`）。
 
-目前尚未送審。公開發布前仍需完成網站權限／Cookie 傳遞的檢查、隱私政策、商店截圖及審查測試指引。Windows 安裝器尚未實作；Linux 有註冊路徑支援，但尚未實機驗證。
+- **最小權限與無 Cookie 外傳**：移除 `cookies` 權限與 `document.cookie` 擷取，將安裝期 `<all_urls>` 改為 `activeTab` 搭配按需請求之 `optional_host_permissions`。
+- **免本地端瀏覽器獨立模式**：即使尚未安裝本地 Python Host，側欄仍可直接解析學術網頁書目並一鍵「📋 複製結構化全文 Markdown」。
+- **隱私權政策與送審指南**：完整中英雙語隱私權政策見 [PRIVACY.md](PRIVACY.md)；Chrome Web Store 欄位填寫說明、權限理由與審查員測試指引見 [CHROME_WEB_STORE.md](CHROME_WEB_STORE.md)。

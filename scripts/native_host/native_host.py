@@ -94,15 +94,22 @@ def clean_pdf_text(text: str) -> str:
     """Repair broken hyphens and hard line wraps from PDF text copying."""
     # 1. Rejoin hyphenated words broken across lines: "inter-\nvention" -> "intervention"
     text = re.sub(r'(\b\w+)-\s*\n\s*(\w+\b)', r'\1\2', text)
-    # 2. Join lines that break inside sentences
+    # 2. Join lines that break inside sentences, preserving Markdown block syntax
     lines = text.splitlines()
     joined = []
+    md_block_pattern = re.compile(r'^(?:#{1,6}\s|\||>|[-*+]\s|\d+\.\s|---+$|```)')
     for line in lines:
         stripped = line.strip()
         if not stripped:
             joined.append("")
             continue
-        if joined and joined[-1] and not re.search(r'([.。?!:：]|\b\d+\.|\b[-*#])\s*$', joined[-1]):
+        if (
+            joined
+            and joined[-1]
+            and not md_block_pattern.match(joined[-1])
+            and not md_block_pattern.match(stripped)
+            and not re.search(r'([.。?!:：]|\b\d+\.|\b[-*#])\s*$', joined[-1])
+        ):
             # If current line starts with alphanumeric or non-list marker, join with space
             if re.match(r'^[a-zA-Z0-9\u4e00-\u9fa5]', stripped):
                 joined[-1] = joined[-1] + " " + stripped
@@ -185,40 +192,52 @@ def match_metadata_from_pdf_text(text: str, candidates: List[PaperMetadata]) -> 
     return ranked[0][1]
 
 
+def _yaml_quote(value: Any) -> str:
+    """Format a string safely inside double quotes for YAML frontmatter."""
+    s = str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ").strip()
+    return f'"{s}"'
+
+
 def clean_html_to_md(html_str: str) -> str:
     """Convert copied HTML structure to clean Markdown format."""
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html_str, 'html.parser')
+        for pre in soup.find_all('pre'):
+            pre.replace_with(f'\n```\n{pre.get_text().strip()}\n```\n')
+        for code in soup.find_all('code'):
+            code.replace_with(f'`{code.get_text()}`')
+        for b in soup.find_all(['strong', 'b']):
+            b.replace_with(f'**{b.get_text()}**')
+        for i in soup.find_all(['em', 'i']):
+            i.replace_with(f'*{i.get_text()}*')
         for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
             level = int(h.name[1])
             h.replace_with(f'\n\n{"#" * level} {h.get_text().strip()}\n\n')
         for p in soup.find_all('p'):
             p.replace_with(f'\n\n{p.get_text().strip()}\n\n')
-        for b in soup.find_all(['strong', 'b']):
-            b.replace_with(f'**{b.get_text()}**')
-        for i in soup.find_all(['em', 'i']):
-            i.replace_with(f'*{i.get_text()}*')
         for bq in soup.find_all('blockquote'):
             bq_text = bq.get_text().strip().replace('\n', '\n> ')
             bq.replace_with(f'\n> {bq_text}\n')
-        for pre in soup.find_all('pre'):
-            pre.replace_with(f'\n```\n{pre.get_text().strip()}\n```\n')
-        for code in soup.find_all('code'):
-            code.replace_with(f'`{code.get_text()}`')
         for li in soup.find_all('li'):
             li.replace_with(f'\n- {li.get_text().strip()}')
         for table in soup.find_all('table'):
-            md_table_rows = []
-            headers = [th.get_text().strip() for th in table.find_all('th')]
-            if headers:
-                md_table_rows.append('| ' + ' | '.join(headers) + ' |')
-                md_table_rows.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
-            for tr in table.find_all('tr'):
-                cells = [td.get_text().strip() for td in tr.find_all('td')]
+            rows = table.find_all('tr')
+            if not rows:
+                continue
+            parsed_rows = []
+            for tr in rows:
+                cells = [c.get_text().strip().replace('|', '\\|') for c in tr.find_all(['th', 'td'])]
                 if cells:
-                    md_table_rows.append('| ' + ' | '.join(cells) + ' |')
-            if md_table_rows:
+                    parsed_rows.append(cells)
+            if parsed_rows:
+                col_count = max(len(r) for r in parsed_rows)
+                md_table_rows = []
+                for idx, cells in enumerate(parsed_rows):
+                    padded = cells + [''] * (col_count - len(cells))
+                    md_table_rows.append('| ' + ' | '.join(padded) + ' |')
+                    if idx == 0:
+                        md_table_rows.append('| ' + ' | '.join(['---'] * col_count) + ' |')
                 table.replace_with('\n\n' + '\n'.join(md_table_rows) + '\n\n')
         return soup.get_text().strip()
     except Exception as e:
@@ -234,7 +253,7 @@ class NativeHostHandler:
         self.state_tracker = self.core.state_tracker
         self.gemini_client = GeminiClient()
         self.pdf_resolver = PDFResolver()
-        self._pdf_upload_buffers: Dict[str, bytearray] = {}
+        self._pdf_upload_buffers: Dict[str, Dict[int, str]] = {}
         self._pdf_inspection_paths: Dict[str, str] = {}
 
     def handle_ping(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -242,6 +261,7 @@ class NativeHostHandler:
             "status": "ok",
             "version": "1.0.0",
             "vault_path": str(VAULT_DIR),
+            "vault_name": get_vault_name(),
             "zotero_mode": self.zotero_client.get_status().get("mode", "offline"),
             "zotero_indexed_dois": len(self.zotero_client._local_doi_map),
             "gemini": self.gemini_client.get_status(),
@@ -325,7 +345,7 @@ class NativeHostHandler:
             if pmid:
                 candidates.extend(list(sources_dir.rglob(f"*{pmid}*.md")))
             if doi:
-                doi_clean = doi.replace("/", "_")
+                doi_clean = re.sub(r"[^\w.\-]+", "_", doi)
                 candidates.extend(list(sources_dir.rglob(f"*{doi_clean}*.md")))
             if candidates:
                 ob_has_source = True
@@ -339,7 +359,7 @@ class NativeHostHandler:
             if pmid:
                 candidates.extend(list(sources_dir.rglob(f"*{pmid}*.pdf")))
             if doi:
-                doi_clean = doi.replace("/", "_")
+                doi_clean = re.sub(r"[^\w.\-]+", "_", doi)
                 candidates.extend(list(sources_dir.rglob(f"*{doi_clean}*.pdf")))
             if candidates:
                 ob_has_pdf = True
@@ -467,7 +487,6 @@ class NativeHostHandler:
         pdf_url = payload.get("pdf_url") or meta_dict.get("pdf_url")
         pdf_base64 = payload.get("pdf_base64")
         browser_pdf_failure = payload.get("browser_pdf_failure")
-        cookies = payload.get("cookies")
         referer = payload.get("referer") or meta_dict.get("url")
 
         raw_doi = meta_dict.get("doi")
@@ -507,7 +526,7 @@ class NativeHostHandler:
         if meta.pmid:
             stem = f"{meta.pmid}_{author_lead}_{article_name}_{year_str}"
         elif meta.doi:
-            safe_doi = meta.doi.replace("/", "_")
+            safe_doi = re.sub(r"[^\w.\-]+", "_", meta.doi)
             stem = f"{safe_doi}_{author_lead}_{article_name}_{year_str}"
         else:
             stem = f"{author_lead}_{article_name}_{year_str}"
@@ -580,19 +599,24 @@ class NativeHostHandler:
         # ── 1b. Download / Resolve Official PDF ──
         saved_pdf = False
         pdf_source = None
+        uploaded_path = (
+            pdfs_dir / f"{uploaded_pdf_stem}.pdf"
+            if uploaded_pdf_stem and re.fullmatch(r"[\w.\-]+", uploaded_pdf_stem)
+            else None
+        )
         if dest_pdf_path.exists() and self.pdf_resolver._is_valid_pdf_content(dest_pdf_path.read_bytes()[:2048]):
             saved_pdf = True
             pdf_source = "pre_uploaded"
             logging.info(f"PDF already present on disk: {dest_pdf_path}")
-        elif uploaded_pdf_stem and re.fullmatch(r"[\w.\-]+", uploaded_pdf_stem):
-            uploaded_path = pdfs_dir / f"{uploaded_pdf_stem}.pdf"
-            if uploaded_path.is_file() and self.pdf_resolver._is_valid_pdf_content(uploaded_path.read_bytes()[:2048]):
-                import shutil
-                shutil.copy2(uploaded_path, dest_pdf_path)
-                saved_pdf = True
-                pdf_source = "browser_capture"
-                if uploaded_path != dest_pdf_path:
-                    uploaded_path.unlink()
+            if uploaded_path and uploaded_path.is_file() and uploaded_path != dest_pdf_path:
+                uploaded_path.unlink(missing_ok=True)
+        elif uploaded_path and uploaded_path.is_file() and self.pdf_resolver._is_valid_pdf_content(uploaded_path.read_bytes()[:2048]):
+            import shutil
+            shutil.copy2(uploaded_path, dest_pdf_path)
+            saved_pdf = True
+            pdf_source = "browser_capture"
+            if uploaded_path != dest_pdf_path:
+                uploaded_path.unlink(missing_ok=True)
         elif download_pdf and downloaded_file_path and Path(downloaded_file_path).exists():
             try:
                 import shutil
@@ -620,7 +644,6 @@ class NativeHostHandler:
                 pmid=meta.pmid,
                 pdf_url=pdf_url,
                 pdf_base64=pdf_base64,
-                cookies=cookies,
                 referer=referer,
             )
             if ok:
@@ -678,11 +701,11 @@ class NativeHostHandler:
         if save_source:
             source_lines = []
             source_lines.append("---")
-            source_lines.append(f"title: \"{meta.title}\"")
+            source_lines.append(f"title: {_yaml_quote(meta.title)}")
             if meta.authors:
-                source_lines.append(f"authors: \"{meta.authors}\"")
+                source_lines.append(f"authors: {_yaml_quote(meta.authors)}")
             if meta.journal:
-                source_lines.append(f"journal: \"{meta.journal}\"")
+                source_lines.append(f"journal: {_yaml_quote(meta.journal)}")
             if meta.year:
                 source_lines.append(f"year: {meta.year}")
             if meta.doi:
@@ -759,8 +782,8 @@ class NativeHostHandler:
                     f"citekey: {meta.citekey}",
                     f"doi: {meta.doi or ''}",
                     f"pmid: {meta.pmid or ''}",
-                    f"authors: \"{meta.authors}\"",
-                    f"journal: \"{meta.journal}\"",
+                    f"authors: {_yaml_quote(meta.authors)}",
+                    f"journal: {_yaml_quote(meta.journal)}",
                     f"year: {meta.year or ''}",
                     f"source: \"[[{stem}]]\"",
                 ]
@@ -840,8 +863,12 @@ class NativeHostHandler:
         return {
             "status": "success",
             "message": "文獻全文與結構化筆記已成功入庫！",
+            "stem": stem,
             "metadata": {
                 "title": meta.title,
+                "authors": meta.authors,
+                "journal": meta.journal,
+                "year": meta.year,
                 "citekey": meta.citekey,
                 "doi": meta.doi,
                 "pmid": meta.pmid,
@@ -857,6 +884,7 @@ class NativeHostHandler:
                 "saved": saved_pdf,
                 "source": pdf_source,
                 "path": str(dest_pdf_path.relative_to(VAULT_DIR)) if saved_pdf else None,
+                "obsidian_uri": f"obsidian://open?vault={VAULT_NAME}&file={urllib.parse.quote(str(dest_pdf_path.relative_to(VAULT_DIR)))}" if saved_pdf else None,
                 "size_bytes": dest_pdf_path.stat().st_size if (saved_pdf and dest_pdf_path.exists()) else 0,
                 "zotero_attached": bool(zotero_att_key),
             },
@@ -884,13 +912,14 @@ class NativeHostHandler:
         topic = payload.get("topic", "Neurology")
         stem = payload.get("stem", "document")
 
-        buf = self._pdf_upload_buffers.setdefault(transfer_id, [])
-        buf.append(chunk_b64)
+        buf = self._pdf_upload_buffers.setdefault(transfer_id, {})
+        buf[chunk_index] = chunk_b64
 
         logging.info(f"Received PDF chunk {chunk_index + 1}/{total_chunks} for {stem}")
 
-        if chunk_index + 1 >= total_chunks:
-            full_b64 = "".join(self._pdf_upload_buffers.pop(transfer_id, []))
+        if len(buf) >= total_chunks and all(i in buf for i in range(total_chunks)):
+            chunks_map = self._pdf_upload_buffers.pop(transfer_id, {})
+            full_b64 = "".join(chunks_map[i] for i in range(total_chunks))
             import base64
             try:
                 full_data = base64.b64decode(full_b64)
@@ -947,10 +976,17 @@ class NativeHostHandler:
         if not raw_content:
             return {"status": "error", "message": "剪貼簿或傳入內容為空，無法寫入。"}
 
-        # Format conversion
-        if is_html or ("<p>" in raw_content or "</div>" in raw_content or "</h3>" in raw_content or "<table>" in raw_content):
+        # Format conversion: only parse as HTML when actual HTML elements exist
+        looks_like_html = bool(
+            re.search(
+                r"<\s*(?:p|div|h[1-6]|table|tr|td|th|ul|ol|li|strong|b|em|i|blockquote|pre|code|br|article|section|span)\b[^>]*>",
+                raw_content,
+                re.I,
+            )
+        )
+        if looks_like_html and (is_html or "<p>" in raw_content or "</div>" in raw_content or "</h3>" in raw_content or "<table>" in raw_content):
             processed_content = clean_html_to_md(raw_content)
-        elif is_pdf:
+        elif is_pdf and not looks_like_html:
             processed_content = clean_pdf_text(raw_content)
         else:
             processed_content = raw_content

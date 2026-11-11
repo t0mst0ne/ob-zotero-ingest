@@ -157,7 +157,7 @@ def match_and_plan(
                     # Check title similarity between the two DOIs
                     m_note = metadata_client.fetch_metadata(doi=note_doi)
                     m_pdf = metadata_client.fetch_metadata(doi=pdf_doi)
-                    t_note = m_note.title if m_note else (note.frontmatter.get("title") if note and note.frontmatter else "")
+                    t_note = m_note.title if m_note else (note.existing_frontmatter.get("title", "") if note and note.existing_frontmatter else "")
                     t_pdf = m_pdf.title if m_pdf else ""
                     sim = title_similarity(t_note, t_pdf) if (t_note and t_pdf) else 0.0
 
@@ -266,11 +266,13 @@ def match_and_plan(
     zotero_key: Optional[str] = None
     existing_zotero_item = None
 
-    if zot_status.get("web_api") or zot_status.get("local_api"):
+    if zot_status.get("web_api") or zot_status.get("local_api") or zot_status.get("local_sqlite"):
         if primary_doi:
             existing_zotero_item = zotero_client.find_item_by_doi(primary_doi)
         if not existing_zotero_item and primary_pmid:
             existing_zotero_item = zotero_client.find_item_by_pmid(primary_pmid)
+
+    can_write_zotero = bool(zot_status.get("can_write", zot_status.get("web_api")))
 
     if existing_zotero_item:
         zotero_key = existing_zotero_item["key"]
@@ -283,7 +285,7 @@ def match_and_plan(
 
         # Check existing attachments
         attachments = zotero_client.find_existing_attachments(zotero_key)
-        att_filenames = [a.get("data", {}).get("filename", "") for a in attachments]
+        att_filenames = [a.get("data", {}).get("filename", "") for a in attachments if a.get("data", {}).get("filename")]
 
         if pdf:
             if pdf.filename in att_filenames:
@@ -292,22 +294,35 @@ def match_and_plan(
                     description=f"Zotero 已掛載相同檔名附件 ({pdf.filename})",
                     target="Attachment",
                 ))
-            else:
+            elif can_write_zotero:
                 actions.append(PlanAction(
                     category="新增",
                     description=f"為既有書目補掛附件 ({pdf.filename})",
                     target="Attachment",
                     details={"file": str(pdf.path)},
                 ))
+            else:
+                actions.append(PlanAction(
+                    category="待確認",
+                    description=f"Zotero Web API 未設定，暫緩上傳附件 ({pdf.filename})",
+                    target="Attachment",
+                ))
 
         # Check OB backlink
-        has_ob_link = any("obsidian://" in a.get("data", {}).get("url", "") for a in attachments)
+        has_ob_link = any("obsidian://" in (a.get("data", {}).get("url") or "") for a in attachments)
         if note and not has_ob_link:
-            actions.append(PlanAction(
-                category="新增",
-                description=f"為 Zotero 書目建立返回 OB 筆記之連結",
-                target="Zotero",
-            ))
+            if can_write_zotero:
+                actions.append(PlanAction(
+                    category="新增",
+                    description=f"為 Zotero 書目建立返回 OB 筆記之連結",
+                    target="Zotero",
+                ))
+            else:
+                actions.append(PlanAction(
+                    category="待確認",
+                    description="Zotero Web API 未設定，暫緩建立返回 OB 筆記之連結",
+                    target="Zotero",
+                ))
         elif has_ob_link:
             actions.append(PlanAction(
                 category="沿用",
@@ -316,7 +331,7 @@ def match_and_plan(
             ))
 
     else:
-        if zot_status.get("web_api") or zot_status.get("local_api"):
+        if can_write_zotero:
             actions.append(PlanAction(
                 category="新增",
                 description=f"在 Zotero 建立新書目 ({meta.title[:45]}...)",
@@ -335,10 +350,10 @@ def match_and_plan(
                     target="Zotero",
                 ))
         else:
-            warnings.append("Zotero 目前處於離線狀態；Zotero 書目與附件將標記為待處理 (Pending)。")
+            warnings.append("Zotero 目前處於離線或唯讀狀態；Zotero 書目與附件將標記為待處理 (Pending)。")
             actions.append(PlanAction(
                 category="待確認",
-                description="Zotero 離線：延後建立書目與附件，先完成 OB 原地補登",
+                description="Zotero 離線或未設定 Web API：延後建立書目與附件，先完成 OB 原地補登",
                 target="Zotero",
             ))
 

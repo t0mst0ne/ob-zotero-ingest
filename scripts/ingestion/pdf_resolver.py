@@ -1,8 +1,8 @@
 """
 Multi-source Academic PDF Resolver & Downloader.
 Locates and downloads official paper PDFs via:
-1. Direct active-tab browser session extraction (base64 / credentials)
-2. Direct publisher PDF URL with browser headers & cookies
+1. Direct active-tab browser session extraction (base64)
+2. Direct public publisher PDF URL
 3. Unpaywall Open Access API (fast, legal, high coverage)
 4. OpenAlex Work API (direct OA PDF links)
 5. Europe PMC / PubMed Central (PMC OA service)
@@ -63,18 +63,15 @@ class PDFResolver:
         self,
         url: str,
         dest_path: Path,
-        cookies: Optional[str] = None,
         referer: Optional[str] = None,
     ) -> bool:
-        """Download from a direct URL with optional browser cookies and referer."""
+        """Download from a direct URL with optional referer."""
         if not url or not url.startswith("http"):
             return False
 
         headers = {}
         if referer:
             headers["Referer"] = referer
-        if cookies:
-            headers["Cookie"] = cookies
 
         try:
             logging.info(f"Attempting PDF download from URL: {url}")
@@ -94,7 +91,7 @@ class PDFResolver:
         except Exception as e:
             logging.warning(f"Error downloading PDF from {url}: {e}")
 
-        # Fallback: Use curl with browser-like headers and cookies (bypasses Cloudflare JA3 / TLS fingerprinting blocks)
+        # Fallback: Use curl with browser-like headers
         try:
             import subprocess
             curl_cmd = [
@@ -104,8 +101,6 @@ class PDFResolver:
             ]
             if referer:
                 curl_cmd.extend(["-e", referer])
-            if cookies:
-                curl_cmd.extend(["-H", f"Cookie: {cookies}"])
             curl_cmd.extend(["-o", str(dest_path), url])
             res = subprocess.run(curl_cmd, capture_output=True, timeout=self.timeout + 10)
             if dest_path.exists():
@@ -244,13 +239,12 @@ class PDFResolver:
         pmid: Optional[str] = None,
         pdf_url: Optional[str] = None,
         pdf_base64: Optional[str] = None,
-        cookies: Optional[str] = None,
         referer: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """
         Comprehensive multi-step pipeline to find and save the PDF:
-        1. From browser base64 bytes (fastest, keeps auth/session)
-        2. From active-tab PDF URL (with cookies/referer)
+        1. From browser base64 bytes (fastest, keeps auth/session in browser)
+        2. From active-tab PDF URL
         3. From Unpaywall Open Access
         4. From OpenAlex Open Access
         5. From Europe PMC / PMC
@@ -265,7 +259,7 @@ class PDFResolver:
 
         # 2. Direct Webpage PDF URL
         if pdf_url:
-            if self.download_url(pdf_url, dest_path, cookies=cookies, referer=referer):
+            if self.download_url(pdf_url, dest_path, referer=referer):
                 return True, "webpage_link"
 
         # 3. Unpaywall Open Access API

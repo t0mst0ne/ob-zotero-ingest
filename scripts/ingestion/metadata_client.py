@@ -252,16 +252,40 @@ class MetadataClient:
 
     def fetch_metadata(self, doi: Optional[str] = None, pmid: Optional[str] = None) -> Optional[PaperMetadata]:
         """
-        Fetch metadata trying CrossRef (if DOI provided) first, then PubMed.
+        Fetch metadata combining PubMed and CrossRef when available.
+        Enriches PubMed records with CrossRef abstract/URL and caches resolved PMIDs.
         """
-        if pmid:
-            pubmed = self.fetch_pubmed(pmid)
-            if pubmed:
-                return pubmed
-        meta = self.fetch_crossref(doi) if doi else None
-        if doi and not pmid:
-            pmid = self.find_pmid_by_doi(doi)
-        if meta:
-            meta.pmid = pmid or meta.pmid
-            return meta
-        return self.fetch_pubmed(pmid) if pmid else None
+        clean_doi = normalize_doi(doi) if doi else None
+        clean_pmid = pmid.strip() if pmid else None
+
+        pubmed = self.fetch_pubmed(clean_pmid) if clean_pmid else None
+        resolved_doi = clean_doi or (normalize_doi(pubmed.doi) if pubmed and pubmed.doi else None)
+        crossref = self.fetch_crossref(resolved_doi) if resolved_doi else None
+
+        if pubmed and crossref:
+            if not pubmed.abstract and crossref.abstract:
+                pubmed.abstract = crossref.abstract
+            if not pubmed.url and crossref.url:
+                pubmed.url = crossref.url
+            if not pubmed.doi and crossref.doi:
+                pubmed.doi = crossref.doi
+            self._cache[f"pmid:{clean_pmid}"] = pubmed.to_dict()
+            if pubmed.doi:
+                self._cache[f"doi:{pubmed.doi.lower()}"] = pubmed.to_dict()
+            self._save_cache()
+            return pubmed
+
+        if pubmed:
+            return pubmed
+
+        if resolved_doi and not clean_pmid:
+            clean_pmid = self.find_pmid_by_doi(resolved_doi)
+
+        if crossref:
+            if clean_pmid and crossref.pmid != clean_pmid:
+                crossref.pmid = clean_pmid
+                self._cache[f"doi:{resolved_doi.lower()}"] = crossref.to_dict()
+                self._save_cache()
+            return crossref
+
+        return self.fetch_pubmed(clean_pmid) if clean_pmid else None

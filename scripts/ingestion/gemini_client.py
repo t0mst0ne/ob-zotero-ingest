@@ -13,15 +13,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from ingestion.identifier import normalize_doi, normalize_pmid, parse_frontmatter
-from ingestion.models import PaperMetadata
-from ingestion.runtime_config import RUNTIME_DIR, load_settings
+try:
+    from .identifier import normalize_doi, normalize_pmid, parse_frontmatter
+    from .models import PaperMetadata
+    from .runtime_config import RUNTIME_DIR, load_settings
+except ImportError:
+    from ingestion.identifier import normalize_doi, normalize_pmid, parse_frontmatter
+    from ingestion.models import PaperMetadata
+    from ingestion.runtime_config import RUNTIME_DIR, load_settings
 
 # Base paths
 BASE_DIR = Path(__file__).parent.parent.parent.resolve()
 SCRIPTS_DIR = BASE_DIR / "scripts"
 CONFIG_FILE = RUNTIME_DIR / "gemini.json"
-SKILL_FILE = Path(load_settings()["reading_prompt"]) if load_settings().get("reading_prompt") else None
 
 LATEST_MODELS = [
     "gemini-2.5-flash",
@@ -97,11 +101,13 @@ class GeminiClient:
 
     def _get_read_paper_system_instruction(self) -> str:
         """Load the comprehensive /read-paper prompt guidelines."""
-        if SKILL_FILE and SKILL_FILE.exists():
-            try:
-                return SKILL_FILE.read_text(encoding="utf-8")
-            except Exception:
-                pass
+        try:
+            prompt_path = load_settings().get("reading_prompt")
+            skill_file = Path(prompt_path).expanduser().resolve() if prompt_path else None
+            if skill_file and skill_file.exists():
+                return skill_file.read_text(encoding="utf-8")
+        except Exception:
+            pass
 
         # Fallback standard prompt if file not found
         return """

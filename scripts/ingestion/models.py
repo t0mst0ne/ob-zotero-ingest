@@ -129,6 +129,7 @@ class PaperState:
     pmid: Optional[str] = None
     pdf_path: Optional[str] = None
     pdf_hash: Optional[str] = None
+    source_path: Optional[str] = None
     note_path: Optional[str] = None
     citekey: Optional[str] = None
     zotero_key: Optional[str] = None
@@ -146,6 +147,7 @@ class PaperState:
             "pmid": self.pmid,
             "pdf_path": self.pdf_path,
             "pdf_hash": self.pdf_hash,
+            "source_path": self.source_path,
             "note_path": self.note_path,
             "citekey": self.citekey,
             "zotero_key": self.zotero_key,
@@ -165,6 +167,7 @@ class PaperState:
             pmid=data.get("pmid"),
             pdf_path=data.get("pdf_path"),
             pdf_hash=data.get("pdf_hash"),
+            source_path=data.get("source_path"),
             note_path=data.get("note_path"),
             citekey=data.get("citekey"),
             zotero_key=data.get("zotero_key"),

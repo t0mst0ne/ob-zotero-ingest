@@ -90,11 +90,12 @@ class IngestionCore:
         # ── 1. Zotero Execution ──
         zotero_key = plan.zotero_key
         zot_status = self.zotero_client.get_status()
+        can_write_zotero = bool(zot_status.get("can_write", zot_status.get("web_api")))
 
         if zot_status["mode"] != "offline":
             # 1a. Create Zotero item if needed
             if not zotero_key:
-                if create_zotero_items:
+                if create_zotero_items and can_write_zotero:
                     try:
                         new_key = self.zotero_client.create_item(plan.metadata)
                         if new_key:
@@ -108,6 +109,8 @@ class IngestionCore:
                     except Exception as e:
                         results["errors"].append(f"Zotero create error: {e}")
                         self.state_tracker.mark_failed(primary_id, "zotero_item", str(e))
+                elif create_zotero_items and not can_write_zotero:
+                    results["errors"].append("Zotero Web API is not configured; cannot create new Zotero items.")
             else:
                 self.state_tracker.mark_zotero_item_done(primary_id, zotero_key)
 
@@ -117,7 +120,7 @@ class IngestionCore:
                 needs_att = any(
                     a.target == "Attachment" and a.category == "新增" for a in plan.actions
                 )
-                if needs_att:
+                if needs_att and can_write_zotero:
                     try:
                         att_key = self.zotero_client.add_pdf_attachment(zotero_key, plan.pdf.path)
                         if att_key:
@@ -128,7 +131,9 @@ class IngestionCore:
                     except Exception as e:
                         results["errors"].append(f"Zotero attachment error: {e}")
                         self.state_tracker.mark_failed(primary_id, "zotero_att", str(e))
-                else:
+                elif not needs_att and any(
+                    a.target == "Attachment" and a.category == "沿用" for a in plan.actions
+                ):
                     self.state_tracker.mark_zotero_att_done(primary_id)
 
             # 1c. Add OB backlink to Zotero
@@ -137,7 +142,7 @@ class IngestionCore:
                     a.target == "Zotero" and "返回 OB" in a.description and a.category == "新增"
                     for a in plan.actions
                 )
-                if needs_backlink:
+                if needs_backlink and can_write_zotero:
                     try:
                         link_key = self.zotero_client.add_obsidian_backlink(
                             zotero_key, plan.note.path, vault_name=vault_name or get_vault_name()
@@ -147,7 +152,10 @@ class IngestionCore:
                             self.state_tracker.mark_zotero_link_done(primary_id)
                     except Exception as e:
                         results["errors"].append(f"Zotero backlink error: {e}")
-                else:
+                elif not needs_backlink and any(
+                    a.target == "Zotero" and "回連" in a.description and a.category == "沿用"
+                    for a in plan.actions
+                ):
                     self.state_tracker.mark_zotero_link_done(primary_id)
         else:
             # Zotero offline

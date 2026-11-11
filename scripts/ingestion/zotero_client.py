@@ -46,7 +46,7 @@ class ZoteroClient:
         """Fast offline index directly from Zotero SQLite database."""
         self._local_doi_map: Dict[str, str] = {}
         self._local_pmid_map: Dict[str, str] = {}
-        self._local_attachments_map: Dict[str, List[str]] = {}
+        self._local_attachments_map: Dict[str, List[Dict[str, str]]] = {}
         zotero_dir = get_zotero_dir()
         if zotero_dir is None:
             return
@@ -82,14 +82,21 @@ class ZoteroClient:
                     if m:
                         self._local_pmid_map[m.group(1)] = k
             cur.execute('''
-                SELECT parentItem.key, itemAttachments.path
+                SELECT parentItem.key, itemAttachments.path, urlValues.value
                 FROM itemAttachments
                 JOIN items AS parentItem ON itemAttachments.parentItemID = parentItem.itemID
+                LEFT JOIN itemData AS urlData ON itemAttachments.itemID = urlData.itemID
+                    AND urlData.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'url' LIMIT 1)
+                LEFT JOIN itemDataValues AS urlValues ON urlData.valueID = urlValues.valueID
             ''')
-            for p_key, path in cur.fetchall():
+            for p_key, path, url_val in cur.fetchall():
+                entry: Dict[str, str] = {}
                 if path:
-                    fn = path.replace('storage:', '')
-                    self._local_attachments_map.setdefault(p_key, []).append(fn)
+                    entry["filename"] = path.replace('storage:', '')
+                if url_val:
+                    entry["url"] = url_val
+                if entry:
+                    self._local_attachments_map.setdefault(p_key, []).append(entry)
             conn.close()
         except Exception:
             pass
@@ -117,14 +124,19 @@ class ZoteroClient:
     def get_status(self) -> Dict[str, Any]:
         local_ok = bool(self.local_storage_dir) and self.is_local_api_available()
         web_ok = self.is_web_api_available()
+        sqlite_ok = bool(getattr(self, "_local_doi_map", None) or getattr(self, "_local_pmid_map", None))
         mode = "offline"
         if local_ok and self.prefer_local:
             mode = "local"
         elif web_ok:
             mode = "web"
+        elif sqlite_ok:
+            mode = "local_sqlite"
         return {
             "local_api": local_ok,
+            "local_sqlite": sqlite_ok,
             "web_api": web_ok,
+            "can_write": web_ok,
             "mode": mode,
             "user_id": self.user_id or None,
             "local_storage_exists": bool(self.local_storage_dir and self.local_storage_dir.exists()),
@@ -190,8 +202,8 @@ class ZoteroClient:
     def find_existing_attachments(self, parent_key: str) -> List[Dict[str, Any]]:
         """Retrieve existing child attachments of an item."""
         if hasattr(self, '_local_attachments_map') and parent_key in self._local_attachments_map:
-            filenames = self._local_attachments_map[parent_key]
-            return [{"data": {"filename": fn}} for fn in filenames]
+            entries = self._local_attachments_map[parent_key]
+            return [{"data": dict(entry) if isinstance(entry, dict) else {"filename": entry}} for entry in entries]
 
         if not self.is_web_api_available():
             return []
